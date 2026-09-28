@@ -77,7 +77,13 @@ One per condition = (`total_tokens`, `questions`, `options_per_question`, `batch
 | `token_accounting` | Record above |
 | `fallbacks` | Events seen during the condition |
 
+| `drift` | Canaries measured just before and after this condition: their ratios to the first canary, `max_deviation`, `flagged` (above `--drift-threshold`), `derived_from` |
+
 Rule: `multi_question` and `batch` entries never populate the primary single-request curve.
+
+`sweep.json` and `profile.json` also hold a top-level `canary` block: length, repeats, threshold,
+`baseline_p50_ms` (the first canary), `max_deviation`, and one entry per canary run (`before_item`, which is
+null for the final canary, plus `p50_ms`, `ratio_to_first` and status). Canary runs are never measurement items.
 
 ## Component Profile (`profile.json` items)
 
@@ -88,9 +94,22 @@ One per length, single request, from profile runs only.
 | `total_profiled_ms`, `total_clean_ms` | Profiled and matching clean p50; ratio recorded |
 | `components` | ms and share for: `tokenization_collation`, `attention_projections`, `attention_score_value`, `mlp_norm`, `decision_head`, `option_scoring`, `decoding`, `other` |
 | `explained_fraction` | Sum of named components (excluding `other`) over profiled total |
-| `scaling` | Fitted time exponent versus length per component, across the sweep |
+| `scaling` | Fitted time exponent versus length per component, across the sweep (top level of `profile.json`) |
+| `subcomponents_ms` | Finer split, e.g. `attention_score_value.sdpa_kernel`, `.mask_conversion`, `.mask_construction`; `decision_head.head_attention` |
+| `score_value_by_layer_type` | Attention score/value time for `local`, `global` and `head` layers: layer count, total, per layer |
+| `explained_ok`, `explained_note` | Whether the 90% target is met, and the stated shortfall when it is not |
 
 Rule: shares sum to 1 within rounding; `explained_fraction >= 0.90` or the shortfall is stated.
+
+`attention_score_value` includes building the attention mask (operators directly under the encoder,
+outside every layer) and converting it before the kernel (`aten::where` inside an attention module),
+because the kernel benchmarks count mask work as attention cost too. `subcomponents_ms` keeps them apart,
+since a mask that is cheap to build differently is a different fix from a cheaper kernel.
+`attention_projections` includes RoPE. `other` holds embeddings and time no label covers.
+
+`profile.json` also holds, at top level: `scaling`, `executed_work` (the verdict written into
+`audit.json`, with the fitted local and global exponents), and `overhead_check` (clean path versus stage
+wrappers on the same requests, T029).
 
 ## Microbenchmark Result (`kernels.json` items)
 
@@ -98,17 +117,27 @@ One per (implementation, shape).
 
 | Field | Rule |
 |---|---|
-| `impl` | `dense` / `local` / `gas` (and `reference` for correctness only) |
-| `shape` | batch, heads, length, head dim, block/window size, selection size |
+| `impl` | `dense` / `dense_masked` / `local` / `gas` (and `reference` for correctness only) |
+| `pattern` | Attention pattern computed: `full`, `block_local` or `gather` (`reference.MaskSpec`) |
+| `shape` | batch, heads, length, head dim, block size, selection size (blocks and tokens) |
+| `issued_score_elements` | Score entries the kernel computes, from the tensor shapes it issues (analytical) |
 | `timings_ms` | As in latency measurement; includes mask, routing, padding, copies |
 | `peak_rss_bytes`, `score_matrix_bytes_analytical` | Measured and analytical, kept as separate fields |
 | `correctness[]` | Case name, max abs error, tolerance, pass/fail (`padding`, `boundary_chunk`, `non_divisible_length`, `fully_masked_row`, `mixed_batch`) |
-| `executed_work` | Scaling exponent and verdict: `less_work`, `same_work`, `not_determined` |
+| `executed_work` | Top level of `kernels.json`, per (impl, block, selection): time exponent across lengths, issued-elements exponent, and verdict against dense: `baseline` (dense), `less_work`, `same_work`, `not_determined` |
 
 ## Cost Floor (`floor.json`)
 
-Per length: `floor_ms` (total minus attention score/value), `floor_fraction`, and the analytical
-`8 x (1 - f)` bound at the relevant lengths. Marked `estimate`.
+Per length (`items`): `floor_ms` = total x (1 - attention score/value share), `floor_fraction`, `total_basis`
+(clean p50 from `sweep.json` when present, else the profiled total), `drift_flagged`, `label: estimate`,
+`derived_from`. Separately, `analytical_bound`: `8 x (1 - f512)`, the 4,096-vs-512 ratio that remains with
+free attention, and the same in ms from the clean 512 p50, `label: analytical`. The two are never merged.
+
+## GPU Reference (`gpu_reference.json`)
+
+`environment` (GPU name, compute capability, memory, driver, torch and CUDA build, `hardware_class: gpu`,
+`not_target_cpu: true`), `model`, `precision` (Laya's CUDA autocast defaults), and one item per length with
+p50/p95 timings, peak GPU memory and token accounting. Never read for rankings or curves (results rule 7).
 
 ## Bottleneck Ranking (`report.json` / `report.md`)
 
@@ -118,13 +147,17 @@ Per length: `floor_ms` (total minus attention score/value), `floor_fraction`, an
 | `memory_feasibility[]` | Per length: analytical score-matrix bytes (`analytical`), measured peak RSS (`measured`) for the native run and each kernel, whether the full score matrix fits in available RAM, and which measured path avoids materializing it |
 | `cost_floor[]` | Per length: floor ms and fraction from `floor.json`, tagged `estimate`, shown next to the ranking |
 | `by_length[]` | Ordered components with share of clean end-to-end p50 and links to the supporting sweep/profile items |
-| `assumptions[]` | For each plan assumption (attention dominates near 2K; 512-token latency near 33 ms; local layers skip work): `confirmed` / `contradicted` / `untested`, with evidence links |
+| `assumptions[]` | For each plan assumption (attention dominates near 2K; 512-token latency near 33 ms, whose hardware is unstated and most likely GPU, so the evidence says which hardware each number comes from; local layers skip work): `confirmed` / `contradicted` / `untested`, with evidence links |
 | `statement_status` | Every claim tagged `measured`, `estimated`, or `hypothesized` |
 | `limitations[]` | Stated measurement limits, always including the fixed-thread-count limit from research.md R12 with the recorded thread count and `hybrid_cores` value |
 | `high_variance[]` | Conditions with `p95 / p50 > 1.5`, by reference |
 | `not_run[]` | Unsupported lengths, failed runs, checks that could not run, with reasons |
 | `reproduce[]` | The exact commands for each result |
-| `phase3_implications` | Which prototype directions the data supports, weakens, or leaves open |
+| `phase3_implications` | Which prototype directions the data supports, weakens, or leaves open: each with a stance (`supported`, `weakened`, `open`) and a tagged statement citing the measured cost |
+| `summary` | A few tagged headline statements (latency at the shortest and longest measured length, largest cost, executed-work verdict, verdict counts) |
+| `hypotheses[]` | Pre-registered hypotheses H1-H5 from research.md R13: `confirmed` / `contradicted` / `untested`, with evidence links |
+| `latency` | `primary` (single-request curve) and `multi_and_batch` rows, the latter with the multiplier against one question at the same length |
+| `drift` | Canary summary per file and the flagged conditions |
 
 Relationships: every record carries `run_id`; sweep, profile and kernel items reference the audit
 by `run_id`; the ranking cites items by file and index.

@@ -330,6 +330,10 @@ def child_main(module_function: str, spec_path: str, result_path: str) -> int:
 _FALLBACK_MARKERS = ("falling back to cpu", "running on cpu", "retrying this request on cpu")
 
 
+class ModelLoadError(RuntimeError):
+    """The model could not be loaded: a tool-level failure, not a measurement result."""
+
+
 def resolve_model_revision(model: str, revision: Optional[str]) -> Tuple[Optional[str], str]:
     """(revision to request, how it was chosen). ``reviewed`` uses `laya.revisions.PINNED_REVISIONS`."""
     if os.path.exists(model):
@@ -360,11 +364,14 @@ def load_agent(model: str, revision: Optional[str] = None, threads: Optional[int
         if threads < 1:
             raise ValueError("threads must be >= 1, got %d" % threads)
         torch.set_num_threads(threads)
-    rev, rev_source = resolve_model_revision(model, revision)
     captured = io.StringIO()
     started = time.perf_counter()
-    with contextlib.redirect_stdout(captured):
-        agent = laya.Agent(model, device="cpu", revision=rev, compile=compile)
+    try:
+        rev, rev_source = resolve_model_revision(model, revision)
+        with contextlib.redirect_stdout(captured):
+            agent = laya.Agent(model, device="cpu", revision=rev, compile=compile)
+    except Exception as exc:
+        raise ModelLoadError("%s: %s" % (type(exc).__name__, exc)) from exc
     load_seconds = time.perf_counter() - started
     printed = captured.getvalue()
     if printed:

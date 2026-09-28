@@ -2,7 +2,7 @@
 
 Extending Laya's encoder-only decision models to larger context windows via sparse attention.
 
-Laya does ~33 ms / decision at 512 tokens with full bidirectional attention. Beyond ~2K tokens, encoder O(n²) attention dominates runtime. This fork experiments with chunk-based sparse attention, global CLS tokens, and content-based sparsity to push to 4K–8K context at comparable speed.
+Laya is reported at ~33 ms / decision at 512 tokens (hardware not stated; Laya's own runtime message gives ~35 ms on GPU and ~200-500 ms on CPU, so it is most likely a GPU figure). It is not a CPU baseline for this fork. The English checkpoint's encoder mixes global attention (10 of 28 layers) with local attention over a 128-token window (±64) in the other 18, and its 2-layer decision head attends over the full sequence. Whether attention dominates runtime beyond ~2K tokens is an open question that Phase 1 measures ([`specs/001-cpu-path-audit`](specs/001-cpu-path-audit/spec.md)). This fork experiments with chunk-based sparse attention, global CLS tokens, and content-based sparsity to push to 4K–8K context at comparable speed.
 
 This is a research fork. It strips Laya down to the core inference path and adds pluggable attention variants. The full research plan is in [`docs/research-plan.md`](docs/research-plan.md).
 
@@ -18,17 +18,27 @@ print(result['answers'])
 "
 ```
 
+## Running the Phase 1 measurements
+
+Phase 1 measures the unmodified model on the target CPU: a pinned manifest, an audit of what the loaded model is, clean latency, a component profile, attention kernel microbenchmarks and a bottleneck report. Setup, commands and expected results are in [`specs/001-cpu-path-audit/quickstart.md`](specs/001-cpu-path-audit/quickstart.md); on Windows, `experiments/setup_windows.ps1` builds the CPU environment. The short version:
+
+```powershell
+python -m experiments all --run-id full --revision reviewed
+```
+
+Results go to `experiments/results/<run-id>/` (git-ignored), ending in `report.md`. Timings on the fixture model used by the tests are not measurements. GPU numbers come only from the separate `gpu-reference` check and never stand in for CPU results.
+
 ## Attention variants
 
 | Variant | Description | GPU needed | Status |
 |---|---|---|---|
-| `full` | Original full bidirectional attention (Laya baseline) | No | Shipped |
+| `native` | Unmodified Laya: 10 global layers and 18 local layers (128-token window), plus a 2-layer head over the full sequence. The Phase 1 audit found the local window applied as a mask over full-length attention | No | Shipped |
 | `sliding` | Fixed-size local window + global heads | No | Planned |
 | `chunk_cls` | State split into chunks, each encoded by a CLS token | Yes | Primary experiment |
 | `mosa` | MoSA-style dynamic token selection per head | Yes | Secondary |
 | `sqa` | Reduced query heads | No | Quick test |
 
-Select at inference time (no training required for sliding/sqa):
+Only `native` exists today. `laya/layers/attention.py` is still empty, so the selection API below is **planned** and does not run yet:
 
 ```python
 from laya import load
@@ -45,20 +55,21 @@ result = agent.predict(long_state, questions)
 laya-sparse/
 ├── laya/                  # Core library (trimmed from upstream)
 │   ├── __init__.py
-│   ├── agent.py           # predict / predict_batch
-│   ├── load.py            # (merged into agent.py upstream)
-│   ├── common.py          # Shared utilities
-│   ├── layers/            # Pluggable components
-│   │   ├── attention.py   # Attention variants: full, sliding, chunk_cls, mosa, sqa
-│   │   └── __init__.py
+│   ├── agent.py           # Agent, load, predict / predict_batch
+│   ├── common.py          # Model, sequence building, shared utilities
+│   ├── layers/
+│   │   └── attention.py   # Planned home of attention variants (empty today)
 │   └── ...                # Other internal modules from upstream
-├── experiments/           # All experiment code
-│   ├── suite/             # Per-task harnesses
-│   ├── datasets/          # Benchmarks (JSONL)
-│   ├── scripts/           # Profiling and orchestration
+├── experiments/           # Phase 1 measurement tooling (python -m experiments)
+│   ├── cli.py             # Commands: manifest, audit, sweep, profile, kernels, report, all, gpu-reference
+│   ├── kernels/           # Dense, masked, block-local and gather-attend-scatter attention kernels
+│   ├── ...                # manifest, audit, tokens, inputs, runner, timing, profile, floor, report, gpu
 │   └── results/           # Output artifacts (gitignored)
+├── tests/experiments/     # Offline tests on a tiny fixture model (pytest -m "not slow")
+├── specs/                 # Spec Kit features (001-cpu-path-audit)
 ├── docs/
-│   └── research-plan.md   # The experiment roadmap
+│   ├── research-plan.md   # The experiment roadmap
+│   └── sparse-attention-report.md   # Draft report (claims marked as hypotheses until measured)
 ├── pyproject.toml
 ├── README.md
 └── LICENSE

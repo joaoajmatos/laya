@@ -76,3 +76,6 @@ research/*_benchmark_results.json
 
 # Phase 1 measurement outputs (generated per run; never committed)
 experiments/results/
+
+# CUDA environment for the GPU reference check (experiments/setup_gpu.ps1)
+.venv-gpu/

@@ -105,6 +105,13 @@ Sequence shapes come from the audit (heads, head dimension, hidden size), across
 
 **Rationale**: the goal is to learn whether a sparse implementation *can* be faster on this CPU (plan item 3), not to ship one. The selection rule in `gas` is deliberately fixed so that Phase 1 measures data movement cost, not selection quality.
 
+**Implementation note (Phase 5)**: the sparse kernels move blocks into the batch dimension
+(`[batch x blocks, heads, block, head_dim]`) before calling `scaled_dot_product_attention`. With an extra
+fifth dimension, PyTorch used its slow reference path, and `local` was no faster than dense at 2,048 tokens
+despite 5x less work; the 4-D layout was 10-20x faster with identical results. A `dense_masked`
+implementation (the block-local pattern as a mask over full attention, as the native local layers run it)
+is benchmarked beside them, so the report can show a mask alone is not a saving.
+
 **Alternatives considered**: `torch.nn.attention.flex_attention` (CPU support and stability vary by torch version and would add a version dependency); custom C++ or Triton kernels (out of scope, and would not be portable).
 
 ## R9. Memory feasibility and the cost floor
@@ -129,9 +136,9 @@ These are questions the run must answer, listed so they are not forgotten.
 
 - The target CPU is the researcher's Windows PC; its exact CPU model, core layout (including any performance/efficiency core split) and power scheme come from the manifest. If deployment targets another CPU class, the same commands rerun there and produce a separate result set.
 - Does the loaded local attention skip out-of-window work, or run dense masked SDPA? (R3, R5)
-- At what length, if any, does attention score/value time overtake the rest of the forward pass? The plan assumes near 2K and this is unconfirmed.
+- At what length, if any, does attention score/value time overtake the rest of the forward pass? The plan assumes near 2K; the operation count in R13 predicts it does not happen by 2K.
 - Is 8,192 feasible on this machine's RAM for the native model?
-- What is the measured 512-token latency, compared with the ~33 ms historical reference?
+- What is the measured 512-token latency, compared with the ~33 ms historical reference? That reference's hardware is not stated; Laya's own runtime message gives ~35 ms on GPU and ~200-500 ms on CPU, so it is most likely a GPU figure and the comparison says so first.
 - Does the decision head's full-sequence pass contribute enough cost to change which prototype is worth building first?
 
 ## R12. Thread count
@@ -143,3 +150,70 @@ These are questions the run must answer, listed so they are not forgotten.
 **Limitation (stated in the report)**: On a hybrid CPU the Windows scheduler can place threads on efficiency cores, which mostly inflates p95 and run-to-run spread. Absolute latencies hold for the recorded thread count on this machine only and may be pessimistic compared with a tuned deployment. Relative results (component shares, scaling exponents, crossover length) are less affected, because every condition shares the same setting.
 
 **Guard**: The report flags any condition with `p95 / p50 > 1.5` as `high_variance`, so scheduling noise is visible and not mistaken for a trend.
+
+## R13. Pre-registered hypotheses from the audited shapes
+
+Written on 2026-09-28 after the audit of the pinned checkpoint (run `smoke`) and before any
+timing run, so the report can mark each `confirmed`, `contradicted` or `untested` instead of
+explaining results after the fact. All numbers here are **analytical estimates**, not measurements.
+
+**Shapes used (from `audit.json`)**: encoder 28 layers, hidden 1024, 16 heads of 64, MLP
+intermediate 2624 (gated, so the input projection is 1024 x 5248); 10 global layers, 18 local
+layers with a 128-token window; decision head 2 layers, 16 heads, hidden 1024, FFN 4096, over the
+full sequence. Matrix-multiply parameters: about 12.2M per encoder layer (341M for 28) plus 25M in
+the head, about 366M in total (embeddings do no matrix work).
+
+**Operation count per request of L tokens**: linear layers about 2 x 366M x L FLOPs; attention
+scores and value product about 4 x L^2 x 1024 FLOPs per full-sequence layer.
+
+| L | Linear layers | Attention share if local layers skip out-of-window work (12 full layers) | Attention share if local layers run dense with a mask (30 full layers) |
+|---|---|---|---|
+| 512 | ~375 GFLOP | ~3% | ~8% |
+| 2,048 | ~1.5 TFLOP | ~12% | ~26% |
+| 8,192 | ~6.0 TFLOP | ~35% | ~58% |
+
+**Hypotheses**
+
+- **H1**: attention score/value work does not dominate end-to-end latency at 2,048 tokens (share below 50%). Contradicts the plan's "attention dominates near 2K".
+- **H2**: if attention overtakes the rest of the forward pass at any length up to 8,192, it happens only when local layers run dense masked attention (`executed_work_note = dense_masked`).
+- **H3**: at 512 tokens on the i7-8700 (6 threads, fp32, AVX2), end-to-end latency is on the order of one second, far above the ~33 ms reference, because that reference is most likely a GPU figure.
+- **H4**: projections and MLPs are the largest measured component at 512 and 2,048 tokens.
+- **H5 (memory)**: if a full score matrix is materialized, one full-sequence layer at 8,192 tokens needs about 16 x 8192^2 x 4 B = 4.3 GB, about 8.6 GB with its softmax output, on top of about 1.7 GB of fp32 weights. 8,192 tokens at batch 1 then fits in 16 GB only with little else running, and batch 4 or 8 at 8,192 fails or pages.
+
+**Implication if H1-H4 hold**: sparse attention alone offers limited gains up to 8K on this CPU.
+Phase 3 would need to reduce linear-layer work (tokens processed, for example by compression or
+chunk selection before the encoder) to change latency substantially.
+
+## R14. Drift canary
+
+**Evidence (smoke run, 2026-09-28)**: within each condition timings were flat (512 tokens: std 46 ms around a
+1,555 ms median). Across the session the machine was not: the same 512-token requests measured 1,758 ms in the
+overhead check that ran last, about 13% slower, and the 2,048-token profile run (7.3 s) was faster than the clean
+2,048 sweep (8.4 s) measured minutes earlier. The likely causes are heat or the CPU's turbo power budget; the tool
+cannot read either on Windows without administrator rights.
+
+**Decision**: re-measure a fixed short condition (512 tokens, one question, 5 repeats) in its own process before
+each new length and once at the end of `sweep` and `profile`. Conditions whose surrounding canaries differ from the
+first canary by more than 5% are flagged. Nothing is rescaled: flagged results stay as measured, and the report
+lists them and treats their curves with that caveat.
+
+**Rationale**: a multi-hour sweep compares lengths measured hours apart, so drift between conditions can bend
+scaling curves and fake or hide a crossover. The canary costs about 15 s per length. The `profiled_to_clean_ratio`
+also mixes instrumentation overhead with drift; the interleaved wrappers on/off check (T029) is the measure of
+instrumentation overhead, and the report says so.
+
+## R15. GPU reference check
+
+**Question**: is the historical ~33 ms at 512 tokens a GPU figure (H3's explanation)?
+
+**Decision**: a separate `gpu-reference` command times native Laya on the researcher's RTX 4060 at 512 and
+2,048 tokens, one question, with Laya's own CUDA defaults, and writes `gpu_reference.json`. It runs from a
+separate environment, `.venv-gpu`, with a CUDA build of PyTorch, so the CPU environment stays CPU-only and a
+GPU can never be used by accident in CPU runs. It runs after the CPU sweep, never during it.
+
+**Scope**: FR-016 and constitution VI forbid GPU numbers standing in for the target CPU. The report cites this
+file only in the note on the reference's hardware. It does not rank, profile or extrapolate from it.
+
+**Interpretation rule, fixed before running**: a 512-token GPU p50 within 2x of 33 ms (under about 66 ms) is
+consistent with the reference being a GPU figure; far above that leaves the reference's hardware unexplained
+and the report says so.

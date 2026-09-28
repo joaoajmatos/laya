@@ -14,7 +14,9 @@ each request. Model loading and one-time compilation are measured separately fro
 request latency. Fixed-schema question-token caching is allowed if disclosed consistently.
 
 The original ~33 ms at 512 tokens is a historical reference to reproduce on the target CPU,
-not an established result for this fork. Attention dominance near 2K and a decoder crossover
+not an established result for this fork. Its hardware is not stated; Laya's own runtime message
+gives ~35 ms on GPU and ~200-500 ms on CPU, so it is most likely a GPU figure. Any comparison with
+the measured CPU latency states this first and is not read as a CPU regression. Attention dominance near 2K and a decoder crossover
 near 4K are questions to measure. The original target of at most 2× the measured 512-token
 latency at 4K is a **stretch target**, not a hard pass/fail requirement.
 
@@ -26,6 +28,12 @@ Audit the pinned checkpoint and loaded implementation before using these observa
   local attention of 128, and global attention every third layer. Its Laya configuration sets
   `max_len=512` and `head_layers=2`. The input cap and positional capacity are distinct;
   positional capacity alone does not establish long-context decision quality.
+- Audited 2026-09-28 (Phase 1 run `smoke`, pinned revision `55cf4c4`, transformers 5.17): the
+  loaded model matches these figures. The encoder is ModernBERT-large shaped (28 layers, hidden
+  1024, 16 heads of 64). Layers 0, 3, ..., 27 (10) are global; the other 18 are local with a
+  128-token window, which is ±64 tokens per side (transformers stores it as `sliding_window=65`).
+  The 2-layer decision head (16 heads, hidden 1024) attends over the full sequence, so 12 of the
+  30 attention layers see every token.
 - The unchanged reference is **native Laya**, including its mixed local/global backbone and
   decision head. An all-global backbone is an optional mask ablation, not the native reference.
   A legacy variant identifier such as `full` must be accompanied by the actual configuration.

@@ -13,6 +13,7 @@ Directory: `experiments/results/<run_id>/` (git-ignored, constitution V).
 | `report.json` | `report` | Bottleneck Ranking |
 | `report.md` | `report` | Human-readable report of the same content |
 | `commands.txt` | every command | The exact command line, appended |
+| `gpu_reference.json` | `gpu-reference` | GPU-only timings of native Laya (research.md R15); never a CPU result |
 
 ## Rules
 
@@ -22,4 +23,4 @@ Directory: `experiments/results/<run_id>/` (git-ignored, constitution V).
 4. Analytical numbers and measured numbers use different field names (for example `score_matrix_bytes_analytical` versus `peak_rss_bytes`).
 5. Every result item that is derived carries `derived_from`, a list of `file#index` references.
 6. `report.md` labels each statement `[measured]`, `[estimated]` or `[hypothesized]`.
-7. GPU results, if ever added, are written to files with a `gpu_` prefix and are never read by `report`.
+7. GPU results are written to files with a `gpu_` prefix. `report` may cite `gpu_reference.json` only in the note on the hardware behind the historical ~33 ms figure, labeled as GPU, and never in rankings, curves, the cost floor or memory feasibility (FR-016).

@@ -12,9 +12,13 @@
 
 ## Abstract
 
-Laya achieves ~33 ms / decision at 512 tokens using full O(n²) bidirectional attention
-in encoder-only models (ModernBERT-large, 421M; mmBERT, 322M). Beyond ~2K tokens,
-attention cost dominates runtime, making long-context scoring impractical. This work
+Laya is reported at ~33 ms / decision at 512 tokens (hardware not stated, most likely a GPU
+figure; Laya's own runtime message gives ~200-500 ms on CPU) with encoder-only models
+(ModernBERT-large, 421M; mmBERT, 322M). The English encoder is not fully global: 10 of its 28
+layers attend globally and 18 use a 128-token local window, and the 2-layer decision head attends
+over the full sequence. The working hypothesis is that beyond ~2K tokens attention cost dominates
+runtime; Phase 1 measures this on the target CPU, and an operation count from the audited shapes
+puts attention at roughly 12-26% of compute at 2K (specs/001-cpu-path-audit/research.md R13). This work
 evaluates five sparse attention strategies to extend context to 4K–8K tokens while
 preserving single-pass scoring speed and decision quality. The primary experiment
 replaces full cross-attention with a chunk-based compression scheme: state tokens are
@@ -31,12 +35,15 @@ at native context, and decoder-based scorers with KV cache reuse (Qwen3-0.6B).
 Decision models in the Laya family are encoder-only Transformers trained via RLCD to
 produce calibrated probability distributions over decision options. Their architecture
 is well-suited for System 1 scoring tasks: a single forward pass, no autoregressive
-generation, bidirectional context, and ~33 ms latency at native context (512 tokens).
+generation, bidirectional context, and a reported ~33 ms latency at native context (512 tokens; hardware
+not stated, most likely GPU).
 
-However, bidirectional attention scales as O(n²) with context length. For a 4K-token
-state, the attention matrix is 64× larger than at 512 tokens. The model's maximum
+However, global bidirectional attention scales as O(n²) with context length. For a 4K-token
+state, a global layer's attention matrix is 64× larger than at 512 tokens (local layers grow
+linearly if they skip out-of-window work, which Phase 1 checks). The model's maximum
 position embedding (8192 for ModernBERT) supports longer input, but full O(n²)
-attention at 4K–8K is ~1–4 seconds per decision — too slow for real-time scoring.
+attention at 4K–8K is estimated at ~1–4 seconds per decision (not yet measured; Phase 1
+measures it on the target CPU) — too slow for real-time scoring.
 
 Decoder-based alternatives (Qwen3-0.6B, Jev) scale better asymptotically thanks to
 KV caches, but underperform at small context sizes and introduce autoregressive

@@ -178,6 +178,6 @@ The researcher receives a single deliverable combining the manifest, context aud
 - Lengths that native Laya cannot support (positional or memory limits) are reported as such, without being worked around.
 - GPU measurements are optional, separately labeled, and not required for this phase.
 - The standalone attention reference implementations are measurement tools. They are not model integrations, and selecting or wiring them into inference is Phase 3.
-- The 33 ms at 512 tokens in the README is a historical reference to be re-measured, not an established result for this fork.
+- The 33 ms at 512 tokens in the README is a historical reference to be re-measured, not an established result for this fork. Its hardware is not stated (most likely GPU; Laya's own runtime message gives ~35 ms on GPU and ~200-500 ms on CPU), so the report states that before comparing it with the CPU measurement.
 - Statistical comparison of quality between variants, calibration, and baselines (windowing, retrieval, decoder scoring) belong to Phase 2 and later, and are out of scope here.
 - Dependencies: the pinned English checkpoint must be obtainable, and the constitution (v1.1.0) governs how measurements are reported.

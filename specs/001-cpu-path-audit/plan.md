@@ -98,11 +98,14 @@ experiments/
 ├── kernels/
 │   ├── __init__.py
 │   ├── reference.py       # Dense same-mask reference with defined fully-masked-row behavior
-│   ├── dense.py           # Dense SDPA baseline
+│   ├── dense.py           # Dense SDPA baseline, and dense_masked (a pattern as a mask over full attention)
 │   ├── local.py           # Local / block attention
 │   ├── gas.py             # Gather-attend-scatter attention
 │   └── bench.py           # Shape sweep, correctness checks, executed-work checks, memory
 ├── floor.py               # Attention-free cost-floor estimate from component costs
+├── gpu.py                 # GPU-only reference check (research.md R15); writes gpu_reference.json
+├── setup_windows.ps1      # CPU environment setup for the measuring machine (.venv, CPU-only torch)
+├── setup_gpu.ps1          # Separate CUDA environment (.venv-gpu) for the GPU reference check
 ├── report.py              # Bottleneck ranking and Markdown/JSON report assembly
 └── results/               # Git-ignored outputs
 

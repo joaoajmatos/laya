@@ -36,14 +36,14 @@ Expected:
 ## 3. Short sweep and profile
 
 ```bash
-python -m experiments sweep   --run-id smoke --lengths 128,512 --repeats 10
+python -m experiments sweep   --run-id smoke --lengths 128,512 --questions 1,2 --batch-sizes 1,4 --repeats 10
 python -m experiments profile --run-id smoke --lengths 128,512 --repeats 5
 ```
 
 Expected:
 - `sweep.json` has p50/p95, `low_sample_p95: true` (fewer than 20 repeats), peak memory, and a token accounting record whose parts sum to `final_length`.
 - `profile.json` has `explained_fraction >= 0.90` or a stated shortfall, and a profiled-to-clean ratio.
-- Confirm the 512 result is compared with the ~33 ms historical figure and the difference is stated, not assumed.
+- Confirm the 512 result is compared with the ~33 ms historical figure only after stating that figure's hardware is unknown (most likely GPU), and that the difference is stated, not assumed.
 
 ## 4. Failure handling
 

@@ -83,3 +83,39 @@ def test_cli_registry_logs_command_and_maps_exit_codes(tmp_path, monkeypatch):
     finally:
         cli.COMMANDS.clear()
         cli.COMMANDS.update(saved)
+
+
+def test_model_that_cannot_load_is_a_tool_error(tmp_path, monkeypatch):
+    from experiments import results
+    monkeypatch.setattr(results, "RESULTS_ROOT", tmp_path)
+    missing = str(tmp_path / "no-such-checkpoint")
+    for cmd in (["sweep", "--lengths", "128", "--questions", "1", "--batch-sizes", "1", "--repeats", "1"],
+                ["profile", "--lengths", "128", "--repeats", "1", "--overhead-length", "0"]):
+        code = cli.main(cmd + ["--run-id", "bad", "--model", missing, "--threads", "1"])
+        assert code == cli.EXIT_TOOL_ERROR
+
+
+def test_run_keeps_one_model_and_revision(tmp_path, monkeypatch, capsys):
+    from experiments import results
+    monkeypatch.setattr(results, "RESULTS_ROOT", tmp_path)
+    run = results.run_dir("r", root=tmp_path)
+    sha = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
+    results.write_json(run, "manifest.json", {"model": {"id": "convaiinnovations/laya", "revision": sha,
+                                                         "revision_source": "reviewed"}})
+    seen = {}
+    saved = dict(cli.COMMANDS)
+    try:
+        cli.COMMANDS.clear()
+
+        @cli.command("probe", "t")
+        def _probe(args):
+            seen["revision"] = args.revision
+
+        assert cli.main(["probe", "--run-id", "r", "--threads", "1"]) == 0
+        assert seen["revision"] == sha  # inherited, so offline runs find the cached snapshot
+        assert cli.main(["probe", "--run-id", "r", "--threads", "1", "--revision", "reviewed"]) == 0
+        assert cli.main(["probe", "--run-id", "r", "--threads", "1", "--revision", "main"]) == cli.EXIT_TOOL_ERROR
+        assert cli.main(["probe", "--run-id", "r", "--threads", "1", "--model", "other/model"]) == cli.EXIT_TOOL_ERROR
+    finally:
+        cli.COMMANDS.clear()
+        cli.COMMANDS.update(saved)
