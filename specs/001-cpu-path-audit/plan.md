@@ -19,20 +19,22 @@ hooks. The spec's permission to edit `laya/` (FR-017 to FR-019) stays available 
 and is not used by this plan.
 
 Each measurement condition runs in its own subprocess. That gives per-condition peak memory, since
-peak RSS is monotonic within a process. It also lets an out-of-memory kill be recorded as a
-failure, since the kernel can end the process on macOS and Linux without raising an exception.
+peak RSS is monotonic within a process. It also lets an out-of-memory end be recorded as a
+failure: on macOS and Linux the kernel can kill the process without raising an exception, and on
+Windows (the measuring machine) memory exhaustion shows up as an allocator exception, a crash exit
+code, or heavy paging that runs into the time cap.
 
 ## Technical Context
 
 **Language/Version**: Python 3.10+ (constitution); development machine has 3.12.8
 
-**Primary Dependencies**: existing `torch>=2.0`, `transformers>=4.48`, `safetensors`, `huggingface_hub`, `numpy`. No new runtime dependency. `pytest` is added as an optional `experiments` extra for tests. Peak memory uses the standard-library `resource` module (units differ on macOS and Linux, handled in one place).
+**Primary Dependencies**: existing `torch>=2.0`, `transformers>=4.48`, `safetensors`, `huggingface_hub`, `numpy`. No new runtime dependency. `pytest` is added as an optional `experiments` extra for tests. Peak memory is read in one platform function, standard library only: on Windows through `ctypes` and `GetProcessMemoryInfo` (`PeakWorkingSetSize` as `peak_rss_bytes`, `PeakPagefileUsage` as `peak_commit_bytes`); on macOS and Linux through `resource.getrusage` (units normalized).
 
 **Storage**: JSON result files under the git-ignored `experiments/results/`. A run directory per session holds the manifest, audit, sweep, profile, kernel, and report outputs.
 
 **Testing**: `pytest`. Unit tests run offline against a tiny randomly initialized ModernBERT-based checkpoint written to a temp directory. Integration tests against the real pinned checkpoint are marked `slow` and need network on first run.
 
-**Target Platform**: The measuring machine, recorded in the manifest. The development machine is an Apple M1 (arm64, 8 cores, 16 GB, no native bf16). Nothing in the tooling is specific to it. Results from a different machine class are separate runs and are never merged.
+**Target Platform**: The measuring machine is the researcher's Windows PC (x86-64, native Windows, not WSL), recorded in the manifest. The tooling must run natively on Windows; macOS and Linux stay supported for reruns elsewhere. Nothing in the tooling is specific to one machine. Threads: one fixed intra-op count per run, default physical cores, no affinity pinning or thread sweep; the limitation this leaves on hybrid CPUs is stated in the report (research.md R12). Results from a different machine class are separate runs and are never merged.
 
 **Project Type**: Research tooling. A CLI package (`python -m experiments`) that imports `laya` as a library.
 

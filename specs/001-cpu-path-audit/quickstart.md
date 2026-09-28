@@ -8,8 +8,9 @@ Commands are the contract in [contracts/cli.md](contracts/cli.md); result shapes
 
 - Python 3.10+; work from the repository root.
 - `pip install -e ".[experiments]"` (installs `laya-sparse` with torch, transformers, and pytest).
-- Network access once, to download the pinned English checkpoint. Afterwards use `HF_HUB_OFFLINE=1`.
-- A quiet machine: close heavy applications, keep the machine on power, and note anything else running.
+- Network access once, to download the pinned English checkpoint. Afterwards set `HF_HUB_OFFLINE=1` (PowerShell: `$env:HF_HUB_OFFLINE = "1"`).
+- A quiet machine: close heavy applications, keep the machine on AC power with the Windows power mode on "Best performance", and note anything else running (the manifest records the power scheme).
+- Commands below work unchanged in PowerShell from the repository root.
 
 ## 1. Offline checks (no download)
 

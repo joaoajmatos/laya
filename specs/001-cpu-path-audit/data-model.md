@@ -15,8 +15,8 @@ One per session. Attached (by `run_id`) to every other record.
 | `code` | `git_sha`, `git_dirty` (bool), `laya_diff_empty` (bool: `laya/` unchanged from the recorded sha) |
 | `model` | `id`, `revision` (resolved commit; required, never `null` for a Hub load), `config_sha256` |
 | `software` | Python, PyTorch, Transformers, NumPy, safetensors versions |
-| `hardware` | CPU model, architecture, physical/logical cores, RAM bytes, OS |
-| `runtime` | Torch intra-op and inter-op threads, BLAS/MKL/OpenMP info, `LAYA_CPU_AMP` value, precision (`dtype`, `amp_enabled`), `compile` flag, concurrent-process note |
+| `hardware` | CPU model, architecture, physical/logical cores, RAM bytes, OS; on Windows also the active power scheme and whether on AC power |
+| `runtime` | Torch intra-op and inter-op threads, thread-count source (`default` / `user`), `hybrid_cores` (`true` / `false` / `unknown`), BLAS/MKL/OpenMP info, `LAYA_CPU_AMP` value, precision (`dtype`, `amp_enabled`), `compile` flag, concurrent-process note |
 | `device` | Requested device (must be `cpu`), effective `agent.device`, fallbacks observed |
 | `cache_policy` | Question-token reuse on/off; document caches: none |
 | `seeds` | Base seed and per-repeat seed rule |
@@ -66,12 +66,14 @@ One per condition = (`total_tokens`, `questions`, `options_per_question`, `batch
 | `condition` | The tuple above, including the option count |
 | `kind` | `single` / `multi_question` / `batch` (never merged in summaries). `single` and `multi_question` time the public `predict`; `batch` times `predict_batch` |
 | `beyond_configured_max_len` | True when `total_tokens` exceeds the agent's configured input cap (`max_len` in the checkpoint config) but not positional capacity. Cost-only measurement; carries no quality claim |
-| `status` | See top of file; `failed` carries `cause` (`oom_kill`, `exception`, `timeout`), `signal`, `exit_code` |
+| `status` | See top of file; `failed` carries `cause` (`oom`, `exception`, `timeout`, `signal`, `crash`), `signal` (POSIX only, else null), `exit_code` |
 | `load_seconds`, `compile_seconds` | Model load and one-time compilation, reported apart from the timings |
 | `repeats` | Requested and completed counts |
 | `timings_ms` | min, p50, p95, mean, std; `low_sample_p95` flag if repeats < 20 |
 | `first_vs_median` | Warmup-leak check |
-| `peak_rss_bytes` | From the condition's own process |
+| `peak_rss_bytes` | From the condition's own process (peak working set on Windows) |
+| `peak_commit_bytes` | Windows only (null elsewhere): peak private commit of the condition's process |
+| `paging_suspected` | True when `peak_commit_bytes` exceeds physical RAM; timings are then cost-only |
 | `token_accounting` | Record above |
 | `fallbacks` | Events seen during the condition |
 
@@ -118,6 +120,8 @@ Per length: `floor_ms` (total minus attention score/value), `floor_fraction`, an
 | `by_length[]` | Ordered components with share of clean end-to-end p50 and links to the supporting sweep/profile items |
 | `assumptions[]` | For each plan assumption (attention dominates near 2K; 512-token latency near 33 ms; local layers skip work): `confirmed` / `contradicted` / `untested`, with evidence links |
 | `statement_status` | Every claim tagged `measured`, `estimated`, or `hypothesized` |
+| `limitations[]` | Stated measurement limits, always including the fixed-thread-count limit from research.md R12 with the recorded thread count and `hybrid_cores` value |
+| `high_variance[]` | Conditions with `p95 / p50 > 1.5`, by reference |
 | `not_run[]` | Unsupported lengths, failed runs, checks that could not run, with reasons |
 | `reproduce[]` | The exact commands for each result |
 | `phase3_implications` | Which prototype directions the data supports, weakens, or leaves open |

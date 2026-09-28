@@ -13,7 +13,7 @@ Common options:
 | `--run-id ID` | Reuse or name a results directory (default: timestamp) |
 | `--model ID_OR_PATH` | Checkpoint (default `convaiinnovations/laya`) |
 | `--revision REV` | Commit to pin; `reviewed` uses `laya.revisions.PINNED_REVISIONS` |
-| `--threads N` | Torch intra-op threads; recorded in the manifest |
+| `--threads N` | Torch intra-op threads, fixed for the whole run and passed to every child (research.md R12). Default: physical core count. On a hybrid CPU, pass the performance-core count. Recorded in the manifest with its source (`default` or `user`) |
 | `--seed N` | Base seed |
 
 ## `manifest`

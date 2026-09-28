@@ -26,8 +26,9 @@ final report must label them as such.
 **Decision**: Run each condition (length x question count x batch size) in a fresh subprocess started by `runner.py`. The parent collects a JSON result from the child's stdout or a temp file, and records exit status.
 
 **Rationale**:
-- Peak RSS (`resource.getrusage`) never decreases within a process, so per-condition peaks need per-condition processes.
-- An out-of-memory condition on macOS or Linux usually ends the process with a signal instead of a catchable exception. A parent process is the only place this can be recorded (FR-015).
+- Peak memory never decreases within a process (`PeakWorkingSetSize` / `PeakPagefileUsage` on Windows, `resource.getrusage` on macOS and Linux), so per-condition peaks need per-condition processes.
+- An out-of-memory condition on macOS or Linux usually ends the process with a signal instead of a catchable exception. Windows has no OOM killer: the commit limit makes allocation fail (a catchable allocator error), the process can die with `STATUS_NO_MEMORY` (0xC0000017), or the pagefile grows and the condition slows into the time cap. A parent process is the only place all of these can be recorded (FR-015).
+- On Windows, a working set can be trimmed under memory pressure, so peak working set alone can understate demand. Peak commit (`PeakPagefileUsage`) is recorded beside it, and a condition whose peak commit exceeds physical RAM is flagged `paging_suspected`; its timings are cost-only.
 - It isolates allocator state, thread pools and cached kernels between conditions.
 
 **Consequence**: model load happens once per subprocess, so model-load time is measured naturally and separately for each (FR-010). Steady-state timings start after warmup inside the child.
@@ -126,9 +127,19 @@ Sequence shapes come from the audit (heads, head dimension, hidden size), across
 
 These are questions the run must answer, listed so they are not forgotten.
 
-- Which figure is the "target CPU"? The development machine is an M1. If deployment targets another CPU class, the same commands rerun there and produce a separate result set.
+- The target CPU is the researcher's Windows PC; its exact CPU model, core layout (including any performance/efficiency core split) and power scheme come from the manifest. If deployment targets another CPU class, the same commands rerun there and produce a separate result set.
 - Does the loaded local attention skip out-of-window work, or run dense masked SDPA? (R3, R5)
 - At what length, if any, does attention score/value time overtake the rest of the forward pass? The plan assumes near 2K and this is unconfirmed.
 - Is 8,192 feasible on this machine's RAM for the native model?
 - What is the measured 512-token latency, compared with the ~33 ms historical reference?
 - Does the decision head's full-sequence pass contribute enough cost to change which prototype is worth building first?
+
+## R12. Thread count
+
+**Decision**: One fixed intra-op thread count for the whole run, passed to every condition's child process. The default is the physical core count, which is PyTorch's own default. On a CPU with performance and efficiency cores, the researcher may pass `--threads` with the performance-core count. There is no CPU affinity pinning and no thread-count sweep.
+
+**Rationale**: How latency scales with threads is not a Phase 1 question. The bottleneck ranking and the attention crossover only need every condition measured under the same setting, and a fixed, recorded value gives that. A thread sweep would multiply run time for an answer that does not change which prototype to build.
+
+**Limitation (stated in the report)**: On a hybrid CPU the Windows scheduler can place threads on efficiency cores, which mostly inflates p95 and run-to-run spread. Absolute latencies hold for the recorded thread count on this machine only and may be pessimistic compared with a tuned deployment. Relative results (component shares, scaling exponents, crossover length) are less affected, because every condition shares the same setting.
+
+**Guard**: The report flags any condition with `p95 / p50 > 1.5` as `high_variance`, so scheduling noise is visible and not mistaken for a trend.
