@@ -64,6 +64,12 @@ laya-sparse/
 └── LICENSE
 ```
 
+## Spec-driven development
+
+This repository uses [GitHub Spec Kit](https://github.com/github/spec-kit) with Codex and Claude Code. The same workflow skills are installed in each agent's recognized folder: `.agents/skills/` for Codex and `.claude/skills/` for Claude Code. Skill files use a shared format, but agents do not all discover skills from the same folder. Shared templates and helper scripts are in `.specify/`, and project-specific principles are recorded in `.specify/memory/constitution.md`.
+
+Use the skills in order for a feature. In Codex, invoke them as `$speckit-specify`, `$speckit-clarify` (when requirements are ambiguous), `$speckit-plan`, `$speckit-tasks`, and `$speckit-implement`. In Claude Code, invoke those same skills as `/speckit-specify`, `/speckit-clarify`, `/speckit-plan`, `/speckit-tasks`, and `/speckit-implement`. `$speckit-analyze`/`/speckit-analyze` and `$speckit-checklist`/`/speckit-checklist` are optional review steps. See the constitution for this project's research and reproducibility constraints.
+
 ## Comparison against decoder models
 
 Results from this fork can be compared against decoder-based scorers (e.g. Qwen3-0.6B via the JEV-CPU repo) by running both against the same JSONL benchmark files.
