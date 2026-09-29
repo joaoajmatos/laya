@@ -275,3 +275,15 @@ fast path needs an even count.
 - `abtest` gains `fastpath_off` (no hooks, fast path off) and `labels_encoder` (hooks on the encoder only,
   the fixed profile path). Expected if the mechanism is right: `labels_encoder` about 1.0 and `fastpath_off`
   about equal to the old `labels` ratio.
+
+**Result (2026-09-29, runs `full` and `full-nofastpath`)**: both predictions held. Same-process A/B:
+`labels_encoder` 1.004 at 2,048 and 1.031 at 8,192 (hooks on the encoder alone change nothing);
+`fastpath_off` 0.808 and 0.692, matching the old `labels` mode (0.816 and 0.682). The re-run profile (head on
+its native path, `head_path: fastpath`) puts the decision head at 12% of time at 512 tokens, 24% at 2,048 and
+37% at 8,192, and all attention (encoder plus head) at 45% at 2,048 and 74% at 8,192. The variant run
+(`--mha-fastpath off`) measured 1.70 s at 512, 7.63 s at 2,048, 19.7 s at 4,096 and 57.7 s at 8,192, and the
+8,192-token peak working set fell from 10.9 GB to 3.2 GB; the 10-question and batch-8 requests at 8,192 no longer
+ran out of memory (8.9 and 7.6 GB, stopped by the time cap). The materialized score matrices were the head's.
+Cross-session differences (for example 4,096 tokens) include machine drift; the A/B ratios are the controlled
+comparison. The report counts the head's attention with the encoder's when it judges A1, H1 and H2, since R13
+counted the head's two full-sequence layers as attention.

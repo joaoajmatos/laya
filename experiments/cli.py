@@ -78,7 +78,7 @@ def common_parser() -> argparse.ArgumentParser:
     g.add_argument("--threads", type=_positive_int, default=None,
                    help="torch intra-op threads, fixed for the whole run (default: physical core count)")
     g.add_argument("--seed", type=int, default=0, help="base seed (default: %(default)s)")
-    g.add_argument("--mha-fastpath", choices=["on", "off"], default="on",
+    g.add_argument("--mha-fastpath", choices=["on", "off"], default=None,
                    help="PyTorch's TransformerEncoderLayer inference fast path, used by Laya's decision head. "
                         "'on' (default) is native Laya; 'off' is a labelled variant (research.md R17). One setting per run.")
     return p
@@ -115,6 +115,8 @@ def resolve_common(args: argparse.Namespace) -> argparse.Namespace:
     args.run_path = results.run_dir(args.run_id)
     args.run_id = args.run_path.name
     _match_run_manifest(args)
+    if getattr(args, "mha_fastpath", "on") is None:
+        args.mha_fastpath = "on"
     return args
 
 
@@ -131,7 +133,9 @@ def _match_run_manifest(args: argparse.Namespace) -> None:
         return
     model = man.get("model") or {}
     recorded_fp = (man.get("runtime") or {}).get("mha_fastpath", True)
-    if hasattr(args, "mha_fastpath") and (args.mha_fastpath == "on") != bool(recorded_fp):
+    if getattr(args, "mha_fastpath", "on") is None:
+        args.mha_fastpath = "on" if recorded_fp else "off"   # inherit, like the revision
+    elif (args.mha_fastpath == "on") != bool(recorded_fp):
         raise ToolError("run %r was recorded with --mha-fastpath %s; use another --run-id for the other setting"
                         % (args.run_id, "on" if recorded_fp else "off"))
     if model.get("id") and model["id"] != args.model:

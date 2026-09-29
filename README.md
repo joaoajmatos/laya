@@ -69,7 +69,8 @@ laya-sparse/
 ├── specs/                 # Spec Kit features (001-cpu-path-audit)
 ├── docs/
 │   ├── research-plan.md   # The experiment roadmap
-│   └── sparse-attention-report.md   # Draft report (claims marked as hypotheses until measured)
+│   ├── sparse-attention-report.md   # Draft report (claims marked as hypotheses until measured)
+│   └── raya-feasibility.md          # Draft: a Rust CPU-native runtime, checked against Phase 1 measurements
 ├── pyproject.toml
 ├── README.md
 └── LICENSE

@@ -206,7 +206,9 @@ def ranking(sweep, profile, floor) -> Tuple[List[Dict[str, Any]], List[Dict[str,
         refs = ["sweep.json#%d" % si, "profile.json#%d" % pi]
         entries = [{"component": k, "share": v["share"], "ms_of_clean_p50": v["share"] * p50, "derived_from": refs}
                    for k, v in comps]
+        aa = _attn_share(profs, L)
         by_length.append({"length": L, "clean_p50_ms": p50, "cost_only": bool(s.get("beyond_configured_max_len")),
+                          "all_attention_share": aa[0] if aa else None,
                           "clean_status": s.get("status"), "clean_repeats": s.get("repeats"),
                           "drift_flagged": bool((s.get("drift") or {}).get("flagged") or (p.get("drift") or {}).get("flagged")),
                           "explained_fraction": p.get("explained_fraction"), "components": entries,
@@ -225,6 +227,23 @@ def _share(profs, L, comp) -> Optional[Tuple[float, str]]:
     return x[1]["components"][comp]["share"], "profile.json#%d" % x[0]
 
 
+def _attn_share(profs, L) -> Optional[Tuple[float, str, float, float]]:
+    """All attention score/value work (encoder plus decision head) as a share of profiled time.
+
+    R13 counts the head's two full-sequence layers as attention; with the head on PyTorch's fast path
+    its attention is `decision_head.head_attention`, not `attention_score_value` (research.md R17).
+    """
+    x = profs.get(L)
+    if not x or x[1].get("status") != "measured" or not x[1].get("components"):
+        return None
+    it = x[1]
+    enc = it["components"]["attention_score_value"]["share"]
+    total = sum(c["ms"] for c in it["components"].values()) or it.get("total_profiled_ms") or 0
+    head_ms = (it.get("subcomponents_ms") or {}).get("decision_head.head_attention", 0.0)
+    head = head_ms / total if total else 0.0
+    return enc + head, "profile.json#%d" % x[0], enc, head
+
+
 def _nearest(profs, target, lo, hi):
     cands = [L for L, (i, p) in profs.items() if lo <= L <= hi and p.get("status") == "measured" and p.get("components")]
     return min(cands, key=lambda L: abs(math.log(L / target))) if cands else None
@@ -241,10 +260,11 @@ def assumptions(audit, sweep, profile, gpu) -> Tuple[List[Dict[str, Any]], List[
         out.append({"id": "A1", "assumption": "attention dominates near 2,000 tokens", "verdict": "untested",
                     "evidence": "no measured profile between 1,536 and 3,072 tokens", "derived_from": []})
     else:
-        sh, ref = _share(profs, L, "attention_score_value")
+        sh, ref, enc, head = _attn_share(profs, L)
         out.append({"id": "A1", "assumption": "attention dominates near 2,000 tokens",
                     "verdict": "confirmed" if sh >= 0.5 else "contradicted",
-                    "evidence": "attention score/value is %s of profiled time at %d tokens" % (_pct(sh), L),
+                    "evidence": "attention score/value is %s of profiled time at %d tokens (encoder %s, decision head %s)"
+                                % (_pct(sh), L, _pct(enc), _pct(head)),
                     "derived_from": [ref]})
 
     # A2: 512 tokens near 33 ms
@@ -282,15 +302,16 @@ def assumptions(audit, sweep, profile, gpu) -> Tuple[List[Dict[str, Any]], List[
                 "derived_from": ["audit.json#executed_work_note"] + list(ew.get("derived_from", []))})
 
     # H1: attention below 50% at 2,048
-    x = _share(profs, 2048, "attention_score_value")
+    x = _attn_share(profs, 2048)
     hyp.append({"id": "H1", "hypothesis": "attention score/value is below 50% of time at 2,048 tokens",
                 "verdict": "untested" if x is None else ("confirmed" if x[0] < 0.5 else "contradicted"),
-                "evidence": "no measured profile at 2,048" if x is None else "share %s" % _pct(x[0]),
+                "evidence": "no measured profile at 2,048" if x is None else
+                "share %s (encoder %s, decision head %s)" % (_pct(x[0]), _pct(x[2]), _pct(x[3])),
                 "derived_from": [x[1]] if x else []})
 
     # H2: attention overtakes the rest only if local layers run dense masked
-    over = [(L, _share(profs, L, "attention_score_value")) for L in sorted(profs)]
-    over = [(L, s) for L, s in over if s and s[0] >= 0.5]
+    over = [(L, _attn_share(profs, L)) for L in sorted(profs)]
+    over = [(L, (s[0], s[1])) for L, s in over if s and s[0] >= 0.5]
     if not over:
         hyp.append({"id": "H2", "hypothesis": "attention overtakes the rest only when local layers run dense masked",
                     "verdict": "untested", "evidence": "attention did not reach 50% at any profiled length, so the "
@@ -353,7 +374,9 @@ def assumptions(audit, sweep, profile, gpu) -> Tuple[List[Dict[str, Any]], List[
         hyp.append({"id": "H5", "hypothesis": "a materialized score matrix makes 8,192 tokens memory-bound",
                     "verdict": "confirmed" if materialized else "contradicted",
                     "evidence": "peak working set %s at 8,192 vs %s at the smallest length: grew %s, against %s for "
-                                "one full score matrix (analytical)" % (_gb(rss), _gb(base), _gb(grew), _gb(need)),
+                                "one full score matrix (analytical)%s" % (_gb(rss), _gb(base), _gb(grew), _gb(need),
+                                "; with the decision head on PyTorch's fast path the materialized matrices are most "
+                                "likely the head's (research.md R17)" if materialized else ""),
                     "derived_from": ["sweep.json#%d" % s8[0]]})
     return out, hyp
 
@@ -682,6 +705,9 @@ def summary(lat, by_length, plan_assumptions, hypotheses, audit, manifest=None) 
         out.append(stmt("measured", "Largest cost at %d tokens: %s, %s of the clean p50."
                         % (b["length"], COMPONENT_NAMES.get(top["component"], top["component"]), _pct(top["share"])),
                         b["derived_from"]))
+        if b.get("all_attention_share") is not None:
+            out.append(stmt("measured", "All attention score/value at %d tokens, encoder plus decision head: %s."
+                            % (b["length"], _pct(b["all_attention_share"])), b["derived_from"]))
     v = (audit.get("executed_work_note") or {}).get("verdict")
     if v:
         out.append(stmt("measured", "Local-layer executed work: %s." % v, ["audit.json#executed_work_note"]))
@@ -706,6 +732,11 @@ def build_report(run_path: Union[str, Path]) -> Dict[str, Any]:
         raise ReportError("report needs %s in %s; run `audit` for this run first" % (" and ".join(missing), run))
     files = {n: _load(run, n) for n in ("sweep.json", "profile.json", "kernels.json", "floor.json",
                                          "gpu_reference.json", "abtest.json")}
+    if files["profile.json"] is not None:
+        # floor.json is written by `kernels`; rebuild it so it always matches the current profile
+        from .floor import build_floor
+        files["floor.json"] = build_floor(run)
+        results.write_json(run, "floor.json", files["floor.json"])
     sweep, profile, kernels, floor, gpu = (files[n] for n in ("sweep.json", "profile.json", "kernels.json",
                                                               "floor.json", "gpu_reference.json"))
     lat = latency_tables(sweep)
@@ -813,6 +844,9 @@ def render_markdown(body: Dict[str, Any], run_id: str) -> str:
             add("- [measured] %d. %s: %s, about %s of the clean p50. (%s)" % (
                 rank, COMPONENT_NAMES.get(c["component"], c["component"]), _pct(c["share"]), _ms(c["ms_of_clean_p50"]),
                 ", ".join(c["derived_from"])))
+        if b.get("all_attention_share") is not None:
+            add("- [measured] All attention score/value, encoder plus decision head: %s of profiled time. (%s)"
+                % (_pct(b["all_attention_share"]), b["derived_from"][1]))
         f = floors.get(b["length"])
         if f:
             add("- [estimated] Cost floor with free attention: %s (%s of the total). (%s)" % (

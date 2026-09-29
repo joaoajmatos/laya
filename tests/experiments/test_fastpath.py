@@ -78,7 +78,15 @@ def test_one_setting_per_run(fastpath_checkpoint, tmp_path, monkeypatch):
                          "--mha-fastpath", "off"]) == 0
         man = results.read_json(tmp_path / "v", "manifest.json")
         assert man["runtime"]["mha_fastpath"] is False and man["runtime"]["variant"] == "mha_fastpath_off"
-        assert cli.main(["manifest", "--run-id", "v", "--model", fastpath_checkpoint, "--threads", "1"]) \
-            == cli.EXIT_TOOL_ERROR
+        assert cli.main(["manifest", "--run-id", "v", "--model", fastpath_checkpoint, "--threads", "1",
+                         "--mha-fastpath", "on"]) == cli.EXIT_TOOL_ERROR
+        # without the flag the run's setting is inherited, so commands like `report` just work
+        assert cli.main(["report", "--run-id", "v", "--model", fastpath_checkpoint, "--threads", "1"]) \
+            == cli.EXIT_TOOL_ERROR  # no audit.json yet: a report error, not a setting error
+        assert cli.main(["audit", "--run-id", "v", "--model", fastpath_checkpoint, "--threads", "1"]) == 0
+        assert results.read_json(tmp_path / "v", "manifest.json")["runtime"]["mha_fastpath"] is False
+        assert cli.main(["report", "--run-id", "v", "--model", fastpath_checkpoint, "--threads", "1"]) == 0
+        text = (tmp_path / "v" / "report.md").read_text(encoding="utf-8")
+        assert "variant mha_fastpath_off, not native Laya" in text
     finally:
         torch.backends.mha.set_fastpath_enabled(True)
