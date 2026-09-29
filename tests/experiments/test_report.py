@@ -246,3 +246,16 @@ def test_local_kernel_saving_estimate(run):
     assert e["saving_fraction"] == pytest.approx(18 * 43.7 / 7300) and e["label"] == "estimate"
     assert est["statement"]["tag"] == "estimated"
     assert "kernels.json#0" in est["statement"]["derived_from"]
+
+
+def test_open_questions_from_r11(run):
+    body = R.build_report(run)
+    qs = {q["question"]: q["answer"] for q in body["open_questions"]}
+    assert len(qs) == 6
+    assert "Test CPU" in qs["Which CPU is the target?"]["text"]
+    assert "dense_masked" in qs["Do the local layers skip out-of-window work?"]["text"]
+    assert "Unanswerable" in qs["Is 8,192 tokens feasible in this machine's RAM?"]["text"]  # the 8K run failed
+    for a in qs.values():
+        assert a["tag"] in R.TAGS
+    R.write_report(run)
+    assert "## Open questions from research.md R11" in (run / "report.md").read_text(encoding="utf-8")

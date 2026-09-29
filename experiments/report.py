@@ -719,6 +719,66 @@ def summary(lat, by_length, plan_assumptions, hypotheses, audit, manifest=None) 
     return out
 
 
+def open_questions(manifest, audit, lat, by_length, mem, gpu) -> List[Dict[str, Any]]:
+    """Answers to the open items of research.md R11 (T047), each from the data or stated as unanswerable."""
+    out = []
+    hw = manifest.get("hardware", {})
+    out.append({"question": "Which CPU is the target?", "answer": stmt(
+        "measured", "%s, %s physical cores (hybrid_cores=%s), %s RAM, power scheme at audit %s."
+        % (hw.get("cpu_model"), hw.get("physical_cores"), hw.get("hybrid_cores"),
+           _gb(hw.get("ram_bytes")) if isinstance(hw.get("ram_bytes"), (int, float)) else "unknown",
+           hw.get("power_scheme", "not recorded")), ["manifest.json#hardware"])})
+    ew = (audit.get("executed_work_note") or {})
+    out.append({"question": "Do the local layers skip out-of-window work?", "answer": stmt(
+        "measured", "Verdict %s. %s" % (ew.get("verdict", "not_yet_determined"), ew.get("note", "")),
+        ["audit.json#executed_work_note"])})
+    cross = next((b for b in by_length if (b.get("all_attention_share") or 0) >= 0.5), None)
+    if by_length:
+        out.append({"question": "At what length does attention overtake the rest of the forward pass?", "answer": stmt(
+            "measured", ("At %d tokens: attention score/value, encoder plus decision head, is %s of profiled time. "
+                         "Shares by length: %s." % (cross["length"], _pct(cross["all_attention_share"]),
+                                                   ", ".join("%d: %s" % (b["length"], _pct(b.get("all_attention_share")))
+                                                             for b in by_length)))
+            if cross else "It does not, up to %d tokens." % by_length[-1]["length"],
+            (cross or by_length[-1])["derived_from"])})
+    else:
+        out.append({"question": "At what length does attention overtake the rest of the forward pass?",
+                    "answer": stmt("measured", "Unanswerable here: no ranked lengths in this run.", [])})
+    m8 = next((m for m in mem if m["length"] == 8192), None)
+    if m8 and m8.get("native_peak_rss_bytes"):
+        out.append({"question": "Is 8,192 tokens feasible in this machine's RAM?", "answer": stmt(
+            "measured", "One document, one question: peak %s of %s RAM%s. Several questions or documents at 8,192 are "
+            "listed under 'Not run' where they failed or were cut short."
+            % (_gb(m8["native_peak_rss_bytes"]), _gb(m8.get("ram_bytes")),
+               ", paging suspected" if m8.get("paging_suspected") else ", no paging"),
+            [r for r in m8["derived_from"] if r.startswith("sweep.json")])})
+    else:
+        out.append({"question": "Is 8,192 tokens feasible in this machine's RAM?",
+                    "answer": stmt("measured", "Unanswerable here: no completed 8,192-token memory measurement.", [])})
+    p512 = next((r for r in lat["primary"] if r["length"] == 512 and r["p50_ms"]), None)
+    g512 = next(((i, it) for i, it in _items(gpu) if it.get("condition", {}).get("total_tokens") == 512
+                 and it.get("timings_ms")), None)
+    if p512:
+        txt = "CPU p50 %s at 512 tokens, %.0fx the ~33 ms reference." % (_ms(p512["p50_ms"]), p512["p50_ms"] / HISTORICAL_MS)
+        refs = [p512["ref"]]
+        if g512:
+            txt += " GPU-only check: %s at 512 tokens on %s, consistent with the reference being a GPU figure." % (
+                _ms(g512[1]["timings_ms"]["p50"]), (gpu or {}).get("environment", {}).get("device_name", "a GPU"))
+            refs.append("gpu_reference.json#%d" % g512[0])
+        out.append({"question": "What is the 512-token latency against the ~33 ms reference?",
+                    "answer": stmt("measured", txt, refs)})
+    heads = [(b["length"], next((c["share"] for c in b["components"] if c["component"] == "decision_head"), None), b)
+             for b in by_length]
+    if heads:
+        last = heads[-1]
+        out.append({"question": "Does the decision head's full-sequence pass change which prototype to build first?",
+                    "answer": stmt("measured", "The head takes %s of time. %s" % (
+                        ", ".join("%s at %d" % (_pct(h), L) for L, h, _ in heads if h is not None),
+                        "It is a first-order cost at long lengths, and the cheapest one to cut (research.md R17)."
+                        if (last[1] or 0) >= 0.15 else "It is a minor cost in this run."), last[2]["derived_from"])})
+    return out
+
+
 def _read_commands(run: Path) -> List[str]:
     p = run / "commands.txt"
     return [ln.strip() for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()] if p.exists() else []
@@ -767,6 +827,7 @@ def build_report(run_path: Union[str, Path]) -> Dict[str, Any]:
         "drift": drift,
         "not_run": not_run,
         "reproduce": _read_commands(run),
+        "open_questions": open_questions(manifest, audit, lat, by_length, mem, gpu),
         "phase3_implications": implications(by_length, lat, profile, audit, floor, kernels, files.get("abtest.json")),
         "kernels_executed_work": ((kernels or {}).get("executed_work") or {}).get("groups", []),
         "statement_status": {"tags": list(TAGS), "rule": "every statement in report.md begins with its tag"},
@@ -905,6 +966,13 @@ def render_markdown(body: Dict[str, Any], run_id: str) -> str:
                 "%.2f" % g["time_exponent"] if g["time_exponent"] is not None else "n/a",
                 ", ".join(map(str, g["lengths"])), g["verdict"], ", ".join(g["derived_from"][:3]) + (" ..." if len(g["derived_from"]) > 3 else "")))
         add("")
+    add("## Open questions from research.md R11")
+    add("")
+    for q in body.get("open_questions", []):
+        a = q["answer"]
+        add("- [%s] %s %s%s" % (a["tag"], q["question"], a["text"],
+                                (" (" + ", ".join(a["derived_from"]) + ")") if a["derived_from"] else ""))
+    add("")
     add("## Implications for Phase 3")
     add("")
     for i in body["phase3_implications"]:
