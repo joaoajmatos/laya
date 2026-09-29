@@ -28,6 +28,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from .results import Status, summarize
 
+FASTPATH_OP = "aten::_transformer_encoder_layer_fwd"
+FASTPATH_ATTENTION_OPS = ("aten::_native_multi_head_attention", "aten::_masked_softmax")
+
 COMPONENTS = ("tokenization_collation", "attention_projections", "attention_score_value",
               "mlp_norm", "decision_head", "option_scoring", "decoding", "other")
 NAMED = COMPONENTS[:-1]
@@ -87,6 +90,26 @@ def _layer_kind(i, layer, ecfg) -> str:
     return _layer_type(i, layer, ecfg)[0]
 
 
+def head_takes_fastpath(agent) -> bool:
+    """Whether the decision head's layers would take PyTorch's inference fast path when unhooked.
+
+    Mirrors the static conditions in `nn.TransformerEncoderLayer.forward` (torch 2.x); the per-call
+    ones (no grad, eval, 3-D input, no autocast) hold for Laya's CPU inference.
+    """
+    import torch
+    head = getattr(agent.model, "head", None)
+    layers = list(getattr(head, "layers", []) or [])
+    if not layers or not torch.backends.mha.get_fastpath_enabled():
+        return False
+    for l in layers:
+        a = getattr(l, "self_attn", None)
+        if a is None or not getattr(a, "batch_first", False) or getattr(a, "in_proj_bias", None) is None \
+                or not getattr(a, "_qkv_same_embed_dim", False) or a.num_heads % 2 == 1 \
+                or not getattr(l, "activation_relu_or_gelu", False) or l.norm1.eps != l.norm2.eps:
+            return False
+    return True
+
+
 @contextlib.contextmanager
 def label_modules(agent):
     """Forward pre/post hooks that open `record_function` labels. Always removed on exit."""
@@ -125,10 +148,14 @@ def label_modules(agent):
                 elif "norm" in child_name:
                     add(child, "%senc.L%d.%s.norm" % (PREFIX, i, kind))
         head = getattr(model, "head", None)
-        for i, layer in enumerate(getattr(head, "layers", []) if head is not None else []):
-            add(layer, "%shead.L%d" % (PREFIX, i))
-            if getattr(layer, "self_attn", None) is not None:
-                add(layer.self_attn, "%shead.L%d.attn" % (PREFIX, i))
+        # A hook anywhere in an nn.TransformerEncoderLayer disables PyTorch's inference fast path
+        # (research.md R17), so the head is only labelled when the fast path is already off.
+        # With it on, the head's operators are recognized by the fast-path op instead.
+        if not head_takes_fastpath(agent):
+            for i, layer in enumerate(getattr(head, "layers", []) if head is not None else []):
+                add(layer, "%shead.L%d" % (PREFIX, i))
+                if getattr(layer, "self_attn", None) is not None:
+                    add(layer.self_attn, "%shead.L%d.attn" % (PREFIX, i))
         for name in ("scorer", "act_head", "type_emb"):
             sub = getattr(model, name, None)
             if sub is not None:
@@ -155,6 +182,10 @@ def classify_event(event) -> Optional[Dict[str, Any]]:
     label = next((e.name for e in chain if e.name.startswith(PREFIX)), None)
     if label is None:
         return None
+    if any(e.name == FASTPATH_OP for e in chain):
+        in_attn = any(e.name in FASTPATH_ATTENTION_OPS for e in chain)
+        return {"component": "decision_head", "sub": "head_attention" if in_attn else "head_other",
+                "label": "head.fastpath"}
     lab = label[len(PREFIX):]
     in_sdpa = any("scaled_dot_product" in e.name for e in chain)
     if lab.startswith("head."):
@@ -211,15 +242,19 @@ def attribute(events, total_ms: float, stages: Dict[str, List[float]]) -> Dict[s
     }
 
 
-def _layer_type_summary(by_layer: Dict[str, float]) -> Dict[str, Any]:
+def _layer_type_summary(by_layer: Dict[str, float], head_layers: Optional[int] = None) -> Dict[str, Any]:
     groups = defaultdict(list)
     for label, ms in by_layer.items():
         if label.startswith("head."):
             groups["head"].append(ms)
         else:
             groups[label.split(".")[2]].append(ms)  # enc.L{i}.{kind}.attn
-    return {k: {"n_layers": len(v), "total_ms": sum(v), "per_layer_ms": sum(v) / len(v)}
-            for k, v in groups.items()}
+    out = {k: {"n_layers": len(v), "total_ms": sum(v), "per_layer_ms": sum(v) / len(v)} for k, v in groups.items()}
+    if "head" in out and "head.fastpath" in by_layer and head_layers:
+        # one fast-path label covers every head layer
+        out["head"]["n_layers"] = head_layers
+        out["head"]["per_layer_ms"] = out["head"]["total_ms"] / head_layers
+    return out
 
 
 def profile_in_process(agent, spec: Dict[str, Any], load_info: Optional[Dict[str, Any]] = None,
@@ -268,8 +303,10 @@ def profile_in_process(agent, spec: Dict[str, Any], load_info: Optional[Dict[str
                 _call(agent, kind, st, q, total)
                 total_ms = (time.perf_counter() - t0) * 1000.0
         last = total_ms / 1000.0
-        att = attribute(prof.events(), total_ms, stages)
+        events = prof.events()
+        att = attribute(events, total_ms, stages)
         att["total_profiled_ms"] = total_ms
+        att["head_fastpath"] = any(e.name == FASTPATH_OP for e in events)
         att["stage_ms"] = {k: sum(v) for k, v in stages.items()}
         runs.append(att)
         if r == 0:
@@ -295,7 +332,11 @@ def profile_in_process(agent, spec: Dict[str, Any], load_info: Optional[Dict[str
     layer_keys = sorted({k for r in runs for k in r["score_value_by_layer"]})
     by_layer = {k: med([r["score_value_by_layer"].get(k, 0.0) for r in runs]) for k in layer_keys}
     rec["score_value_by_layer_ms"] = by_layer
-    rec["score_value_by_layer_type"] = _layer_type_summary(by_layer)
+    head_layers = len(getattr(getattr(agent.model, "head", None), "layers", []) or [])
+    rec["score_value_by_layer_type"] = _layer_type_summary(by_layer, head_layers)
+    rec["head_path"] = "fastpath" if all(r["head_fastpath"] for r in runs) else (
+        "modules" if not any(r["head_fastpath"] for r in runs) else "mixed")
+    rec["mha_fastpath"] = bool(torch.backends.mha.get_fastpath_enabled())
     rec["stage_ms"] = {k: med([r["stage_ms"].get(k, 0.0) for r in runs])
                        for k in sorted({k for r in runs for k in r["stage_ms"]})}
     ok = rec["explained_fraction"] >= EXPLAINED_TARGET
@@ -319,7 +360,8 @@ def profile_condition(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Child-side entry point for `runner.run_condition`."""
     from .runner import load_agent
     started = time.perf_counter()
-    agent, info = load_agent(spec["model"], spec.get("revision"), spec.get("threads"))
+    agent, info = load_agent(spec["model"], spec.get("revision"), spec.get("threads"),
+                             mha_fastpath=bool(spec.get("mha_fastpath", True)))
     rec = profile_in_process(agent, spec, info, started=started)
     rec["model"] = {"id": info["model"], "revision": info["revision"]}
     return rec

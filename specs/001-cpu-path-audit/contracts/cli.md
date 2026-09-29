@@ -15,6 +15,7 @@ Common options:
 | `--revision REV` | Commit to pin; `reviewed` uses `laya.revisions.PINNED_REVISIONS` |
 | `--threads N` | Torch intra-op threads, fixed for the whole run and passed to every child (research.md R12). Default: physical core count. On a hybrid CPU, pass the performance-core count. Recorded in the manifest with its source (`default` or `user`) |
 | `--seed N` | Base seed |
+| `--mha-fastpath on\|off` | PyTorch's `TransformerEncoderLayer` inference fast path, used by Laya's decision head. `on` (default) is native Laya; `off` is a labelled variant (research.md R17). Recorded in the manifest; one setting per run directory |
 
 One model and revision per run: when the run directory already has `manifest.json`, a command that
 gives no `--revision` uses the manifest's resolved commit (so later commands measure the same weights
@@ -73,6 +74,13 @@ GPU-only check of the historical ~33 ms figure (research.md R15). Needs a CUDA b
 `.venv-gpu` (`experiments/setup_gpu.ps1`), after the CPU runs. Options: `--lengths` (default `512,2048`),
 `--repeats` (default 30), `--warmup` (default 5). Uses Laya's own CUDA precision defaults. Writes
 `gpu_reference.json`. Stops with an error when CUDA is unavailable or Laya falls back to another device.
+
+## `abtest`
+Instrumentation A/B test (research.md R16). Options: `--lengths` (default `2048,8192`), `--repeats` (default 4),
+`--modes` (default `clean,wrappers,labels,profiler,all`; also `fastpath_off` and `labels_encoder`, research.md R17; `clean` is required), `--time-cap` (default 2400 s).
+Each length runs in its own process; within it the same documents run under every mode, interleaved with a
+rotating order. Writes `abtest.json` with per-mode timings, the ratio of each mode's p50 to clean, and the
+thread count after each call.
 
 ## `report`
 Assemble `report.md` and `report.json` from the other files in the run directory. Fails if

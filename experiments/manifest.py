@@ -294,6 +294,8 @@ def build_manifest(agent, load_info: Dict[str, Any], *, run_id: str, seed: int =
             "dtype": load_info.get("dtype"),
             "amp_enabled": load_info.get("amp_enabled"),
             "compile": load_info.get("compile", False),
+            "mha_fastpath": bool(load_info.get("mha_fastpath", True)),
+            "variant": None if load_info.get("mha_fastpath", True) else "mha_fastpath_off",
             "concurrency": "one measurement process at a time; other programs on the machine are "
                            "not controlled by the tool (close them before measuring)",
         },

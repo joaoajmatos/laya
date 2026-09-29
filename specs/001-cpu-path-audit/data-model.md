@@ -97,6 +97,7 @@ One per length, single request, from profile runs only.
 | `scaling` | Fitted time exponent versus length per component, across the sweep (top level of `profile.json`) |
 | `subcomponents_ms` | Finer split, e.g. `attention_score_value.sdpa_kernel`, `.mask_conversion`, `.mask_construction`; `decision_head.head_attention` |
 | `score_value_by_layer_type` | Attention score/value time for `local`, `global` and `head` layers: layer count, total, per layer |
+| `head_path` | `fastpath`, `modules` or `mixed`: which decision-head path the profiled requests took (research.md R17); `mha_fastpath` records the setting |
 | `explained_ok`, `explained_note` | Whether the 90% target is met, and the stated shortfall when it is not |
 
 Rule: shares sum to 1 within rounding; `explained_fraction >= 0.90` or the shortfall is stated.
@@ -132,6 +133,15 @@ Per length (`items`): `floor_ms` = total x (1 - attention score/value share), `f
 (clean p50 from `sweep.json` when present, else the profiled total), `drift_flagged`, `label: estimate`,
 `derived_from`. Separately, `analytical_bound`: `8 x (1 - f512)`, the 4,096-vs-512 ratio that remains with
 free attention, and the same in ms from the clean 512 p50, `label: analytical`. The two are never merged.
+
+## Instrumentation A/B (`abtest.json`)
+
+One item per length: `modes`, `samples_ms` per mode, `timings_ms` per mode, `ratio_to_clean` (p50 of each mode
+over clean), `order` (the mode order of each repeat), `threads_after_call`, status and repeats.
+
+Report additions from the full run (research.md R16): `memory_feasibility[].native_materialization` is
+`materialized`, `avoided` or `not_observable` (a matrix under 10% of the load peak), with `native_growth_bytes`;
+`by_length[].clean_status` and `clean_repeats` mark a ranking anchored by a partial clean item (at least 5 repeats).
 
 ## GPU Reference (`gpu_reference.json`)
 

@@ -78,6 +78,9 @@ def common_parser() -> argparse.ArgumentParser:
     g.add_argument("--threads", type=_positive_int, default=None,
                    help="torch intra-op threads, fixed for the whole run (default: physical core count)")
     g.add_argument("--seed", type=int, default=0, help="base seed (default: %(default)s)")
+    g.add_argument("--mha-fastpath", choices=["on", "off"], default="on",
+                   help="PyTorch's TransformerEncoderLayer inference fast path, used by Laya's decision head. "
+                        "'on' (default) is native Laya; 'off' is a labelled variant (research.md R17). One setting per run.")
     return p
 
 
@@ -127,6 +130,10 @@ def _match_run_manifest(args: argparse.Namespace) -> None:
     except (OSError, ValueError):
         return
     model = man.get("model") or {}
+    recorded_fp = (man.get("runtime") or {}).get("mha_fastpath", True)
+    if hasattr(args, "mha_fastpath") and (args.mha_fastpath == "on") != bool(recorded_fp):
+        raise ToolError("run %r was recorded with --mha-fastpath %s; use another --run-id for the other setting"
+                        % (args.run_id, "on" if recorded_fp else "off"))
     if model.get("id") and model["id"] != args.model:
         raise ToolError("run %r was recorded with model %r; this command asks for %r. Use another --run-id."
                         % (args.run_id, model["id"], args.model))
@@ -180,7 +187,8 @@ def load_model(args: argparse.Namespace):
     """Load the agent on CPU for a command; tool-level failures become `ToolError`."""
     from .runner import load_agent
     try:
-        return load_agent(args.model, revision=args.revision, threads=args.threads)
+        return load_agent(args.model, revision=args.revision, threads=args.threads,
+                          mha_fastpath=args.mha_fastpath == "on")
     except Exception as exc:  # model cannot load, or device is not CPU
         raise ToolError("could not load %r on CPU: %s: %s" % (args.model, type(exc).__name__, exc))
 
@@ -331,7 +339,7 @@ class Canary:
             return None
         from .runner import run_condition
         a = self.args
-        spec = {"model": a.model, "revision": a.revision, "threads": a.threads, "seed": a.seed + 7_000_000,
+        spec = {"model": a.model, "revision": a.revision, "threads": a.threads, "mha_fastpath": a.mha_fastpath == "on", "seed": a.seed + 7_000_000,
                 "total_tokens": a.canary_length, "questions": 1, "options": 2, "batch_size": 1,
                 "repeats": a.canary_repeats, "warmup": 2}
         item = run_condition("experiments.timing:measure_condition", spec, time_cap=a.time_cap)
@@ -410,6 +418,7 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
             item = _unsupported(L, q, args.options, b, limit)
         else:
             spec = {"model": args.model, "revision": args.revision, "threads": args.threads,
+                    "mha_fastpath": args.mha_fastpath == "on",
                     "seed": args.seed, "total_tokens": L, "questions": q, "options": args.options,
                     "batch_size": b, "repeats": args.repeats, "warmup": args.warmup}
             item = run_condition("experiments.timing:measure_condition", spec, time_cap=args.time_cap)
@@ -471,6 +480,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
         else:
             _abort_on_load_failure(canary.measure(len(items)) or {}, args, "profile.json", {"items": items})
             spec = {"model": args.model, "revision": args.revision, "threads": args.threads,
+                    "mha_fastpath": args.mha_fastpath == "on",
                     "seed": args.seed, "total_tokens": L, "repeats": args.repeats, "warmup": args.warmup}
             item = run_condition("experiments.profile:profile_condition", spec, time_cap=args.time_cap)
             item.setdefault("condition", {"total_tokens": L, "questions": 1,
@@ -499,6 +509,7 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     body = {"session": session, "items": items, "scaling": scal, "executed_work": verdict, "canary": canary.block()}
     if args.overhead_length:
         spec = {"model": args.model, "revision": args.revision, "threads": args.threads,
+                    "mha_fastpath": args.mha_fastpath == "on",
                 "seed": args.seed, "total_tokens": args.overhead_length, "repeats": 10, "warmup": 2}
         body["overhead_check"] = run_condition("experiments.timing:compare_paths", spec,
                                                time_cap=args.time_cap)
@@ -671,6 +682,7 @@ def _all_args(p: argparse.ArgumentParser) -> None:
 def _cmd_all(args: argparse.Namespace) -> int:
     parser = build_parser()
     common = ["--run-id", args.run_id, "--model", args.model, "--threads", str(args.threads), "--seed", str(args.seed)]
+    common += ["--mha-fastpath", args.mha_fastpath]
     if args.revision:
         common += ["--revision", args.revision]
     for step, passed in _ALL_STEPS:
@@ -687,4 +699,40 @@ def _cmd_all(args: argparse.Namespace) -> int:
         code = COMMANDS[step].run(ns)
         if code:
             return code
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- instrumentation A/B (R16)
+
+def _abtest_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--lengths", type=int_list, default=[2048, 8192])
+    p.add_argument("--repeats", type=_positive_int, default=4)
+    p.add_argument("--modes", default="clean,wrappers,labels,profiler,all")
+    p.add_argument("--time-cap", type=float, default=2400.0)
+
+
+@command("abtest", "Same documents in one process with and without each kind of instrumentation; "
+                   "writes abtest.json.", _abtest_args)
+def _cmd_abtest(args: argparse.Namespace) -> int:
+    from .abtest import MODES
+    from .runner import run_condition
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    bad = [m for m in modes if m not in MODES]
+    if bad or "clean" not in modes:
+        raise ToolError("modes must include clean and come from %s" % (MODES,))
+    session = session_info()
+    items = []
+    for L in args.lengths:
+        spec = {"model": args.model, "revision": args.revision, "threads": args.threads,
+                    "mha_fastpath": args.mha_fastpath == "on", "seed": args.seed,
+                "total_tokens": L, "repeats": args.repeats, "modes": modes}
+        item = run_condition("experiments.abtest:abtest_condition", spec, time_cap=args.time_cap)
+        item.setdefault("condition", {"total_tokens": L, "questions": 1, "options_per_question": 2, "batch_size": 1})
+        items.append(item)
+        _abort_on_load_failure(item, args, "abtest.json", {"session": session, "items": items})
+        ratios = item.get("ratio_to_clean") or {}
+        print("L=%d %s: %s" % (L, item["status"], ", ".join("%s x%.3f" % (m, r) for m, r in ratios.items() if r)
+                               or item.get("reason", "")), flush=True)
+        results.write_json(args.run_path, "abtest.json", {"session": session, "items": items})
+    print(args.run_path / "abtest.json")
     return EXIT_OK

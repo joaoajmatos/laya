@@ -26,6 +26,8 @@ HISTORICAL_MS = 33.0
 GPU_CONSISTENT_MS = 66.0          # research.md R15: within 2x of 33 ms
 ORDER_OF_SECOND = (300.0, 3000.0)  # H3: "on the order of one second"
 HIGH_VARIANCE_RATIO = 1.5          # research.md R12
+OBSERVABLE_FRACTION = 0.1          # a matrix under 10% of the load peak is not observable in peak memory
+MIN_PARTIAL_REPEATS = 5            # a partial clean item with this many repeats may anchor a ranking, labelled
 LINEAR = ("attention_projections", "mlp_norm")
 COMPONENT_NAMES = {
     "tokenization_collation": "tokenization and collation",
@@ -156,6 +158,9 @@ def latency_tables(sweep) -> Dict[str, Any]:
     singles = {L: it for L, (i, it) in _single(sweep).items()}
     for i, it in _items(sweep):
         c, t = it.get("condition", {}), it.get("timings_ms") or {}
+        if not it.get("kind") and c:
+            it = dict(it, kind="batch" if c.get("batch_size", 1) > 1 else
+                      ("multi_question" if c.get("questions", 1) > 1 else "single"))
         row = {"ref": "sweep.json#%d" % i, "length": c.get("total_tokens"), "questions": c.get("questions"),
                "batch_size": c.get("batch_size"), "kind": it.get("kind"), "status": it.get("status"),
                "p50_ms": t.get("p50"), "p95_ms": t.get("p95"), "n": t.get("n"),
@@ -183,7 +188,9 @@ def ranking(sweep, profile, floor) -> Tuple[List[Dict[str, Any]], List[Dict[str,
     for L in sorted(set(singles) | set(profs)):
         si, s = singles.get(L, (None, None))
         pi, p = profs.get(L, (None, None))
-        s_ok = s is not None and s.get("status") == "measured"
+        s_ok = s is not None and (s.get("status") == "measured" or (
+            s.get("status") == "partial" and (s.get("repeats") or {}).get("completed", 0) >= MIN_PARTIAL_REPEATS
+            and (s.get("timings_ms") or {}).get("p50")))
         p_ok = p is not None and p.get("status") == "measured" and p.get("components")
         if not (s_ok and p_ok):
             why = []
@@ -200,6 +207,7 @@ def ranking(sweep, profile, floor) -> Tuple[List[Dict[str, Any]], List[Dict[str,
         entries = [{"component": k, "share": v["share"], "ms_of_clean_p50": v["share"] * p50, "derived_from": refs}
                    for k, v in comps]
         by_length.append({"length": L, "clean_p50_ms": p50, "cost_only": bool(s.get("beyond_configured_max_len")),
+                          "clean_status": s.get("status"), "clean_repeats": s.get("repeats"),
                           "drift_flagged": bool((s.get("drift") or {}).get("flagged") or (p.get("drift") or {}).get("flagged")),
                           "explained_fraction": p.get("explained_fraction"), "components": entries,
                           "derived_from": refs})
@@ -382,9 +390,19 @@ def memory_feasibility(audit, manifest, sweep, kernels, lengths: Iterable[int]) 
             entry["native_peak_commit_bytes"] = s[1].get("peak_commit_bytes")
             entry["paging_suspected"] = bool(s[1].get("paging_suspected"))
             entry["derived_from"].append("sweep.json#%d" % s[0])
-            if base is not None and rss - base < 0.5 * analytical:
+            grew = rss - base if base is not None else None
+            entry["native_growth_bytes"] = grew
+            observable = base is not None and analytical >= OBSERVABLE_FRACTION * base
+            if not observable:
+                entry["native_materialization"] = "not_observable"
+            elif grew >= 0.5 * analytical:
+                entry["native_materialization"] = "materialized"
+            elif analytical >= 0.5 * base:
+                entry["native_materialization"] = "avoided"
                 avoid.append("native Laya (peak grew %s above its smallest-length peak, under half of %s)"
-                             % (_gb(rss - base), _gb(analytical)))
+                             % (_gb(grew), _gb(analytical)))
+            else:
+                entry["native_materialization"] = "not_observable"
         for i, it in kern.get(L, []):
             key = it["impl"] + ("" if it["shape"].get("block") is None else "/b%s" % it["shape"]["block"]) + \
                   ("" if it["shape"].get("selection_blocks") is None else "/s%s" % it["shape"]["selection_blocks"])
@@ -466,6 +484,52 @@ def limitations(manifest, files, drift, beyond) -> List[Dict[str, Any]]:
                       "within the run are more stable." % (
                           ", ".join("%s %s" % (k, _pct(v["max_deviation"])) for k, v in can.items()),
                           len(drift["flagged"])), ["%s#canary" % k for k in can]))
+    for name in ("sweep.json", "profile.json"):
+        runs = [r for r in (((files.get(name) or {}).get("canary") or {}).get("runs") or []) if r.get("ratio_to_first")]
+        if len(runs) > 1:
+            lo, hi = min(r["ratio_to_first"] for r in runs), max(r["ratio_to_first"] for r in runs)
+            s.append(stmt("measured", "%s canary spread: %.2f to %.2f of the first canary across the run. Treat "
+                          "differences between conditions smaller than that as within the machine's own variation."
+                          % (name, lo, hi), ["%s#canary" % name]))
+    singles = {L: it for L, (i, it) in _single(files.get("sweep.json")).items()}
+    base = min((it["peak_rss_bytes"] for it in singles.values()
+                if it.get("peak_rss_bytes") and it.get("status") in ("measured", "partial")), default=None)
+    if base:
+        s.append(stmt("measured", "Peak memory is a process-lifetime maximum and includes loading the model (smallest "
+                      "measured peak %s). Allocations smaller than that during a request cannot be seen, so memory "
+                      "conclusions hold only where the growth is clearly above it." % _gb(base), ["sweep.json"]))
+    gaps = []
+    for i, it in _items(files.get("profile.json")):
+        c = singles.get((it.get("condition") or {}).get("total_tokens"))
+        if c and c.get("timings_ms") and it.get("total_profiled_ms"):
+            gaps.append((it["condition"]["total_tokens"], it["total_profiled_ms"] / c["timings_ms"]["p50"], i))
+    if gaps:
+        s.append(stmt("measured", "Profiled total / clean p50 by length: %s. Values well below 1 mean profiled requests ran "
+                      "faster than clean ones; component shares come from profiled runs, so this is checked by the "
+                      "instrumentation A/B test (research.md R16)." % ", ".join("%d: %.2f" % (L, r) for L, r, _ in gaps),
+                      ["profile.json#%d" % i for _, _, i in gaps]))
+    heads = {it.get("head_path") for _, it in _items(files.get("profile.json")) if it.get("status") == "measured"}
+    if files.get("profile.json") is not None:
+        if heads == {None}:
+            s.append(stmt("measured", "These profile runs predate research.md R17: their module hooks switched off PyTorch's "
+                          "TransformerEncoderLayer fast path in the decision head, so the head measured there is not the "
+                          "head the clean runs use, and the profiled total is lower than the clean one. Encoder components "
+                          "are unaffected; the decision-head share is understated. Re-run `profile` to fix this.",
+                          ["profile.json"]))
+        elif heads:
+            s.append(stmt("measured", "Decision-head path in the profile runs: %s (research.md R17)."
+                          % ", ".join(sorted(h for h in heads if h)), ["profile.json"]))
+    for i, it in _items(files.get("abtest.json")):
+        rt = it.get("ratio_to_clean") or {}
+        if rt:
+            s.append(stmt("measured", "Instrumentation A/B at %s tokens, same documents in one process (p50 relative to "
+                          "clean): %s." % (it["condition"]["total_tokens"],
+                                           ", ".join("%s %.3f" % (k, v) for k, v in rt.items() if v)),
+                          ["abtest.json#%d" % i]))
+            if rt.get("fastpath_off"):
+                s.append(stmt("measured", "At %s tokens, turning off only the decision head's fast path changes p50 by a "
+                              "factor of %.3f with identical answers (research.md R17)."
+                              % (it["condition"]["total_tokens"], rt["fastpath_off"]), ["abtest.json#%d" % i]))
     ov = (files.get("profile.json") or {}).get("overhead_check") or {}
     if ov.get("overhead_ratio"):
         s.append(stmt("measured", "Instrumentation overhead (T029, same requests, interleaved): stage wrappers change "
@@ -480,19 +544,56 @@ def limitations(manifest, files, drift, beyond) -> List[Dict[str, Any]]:
     return s
 
 
-def implications(by_length, lat, profile, audit, floor, kernels) -> List[Dict[str, Any]]:
+def local_kernel_saving(profile, kernels, block: int = 128) -> List[Dict[str, Any]]:
+    """Estimated saving per length from swapping native local-layer attention for the block-local kernel."""
+    kt = {}
+    for i, it in _items(kernels):
+        if it.get("impl") == "local" and it.get("shape", {}).get("block") == block and \
+                it.get("status") == "measured" and it.get("timings_ms"):
+            kt[it["shape"]["length"]] = (i, it["timings_ms"]["p50"])
+    out = []
+    for L, (i, p) in sorted(_profiles(profile).items()):
+        loc = (p.get("score_value_by_layer_type") or {}).get("local")
+        if p.get("status") != "measured" or not loc or "per_layer_ms" not in loc or L not in kt \
+                or not p.get("total_profiled_ms"):
+            continue
+        ki, kms = kt[L]
+        saving = loc["n_layers"] * max(0.0, loc["per_layer_ms"] - kms)
+        out.append({"length": L, "n_local_layers": loc["n_layers"], "native_per_layer_ms": loc["per_layer_ms"],
+                    "kernel_ms": kms, "saving_ms": saving, "profiled_ms": p["total_profiled_ms"],
+                    "saving_fraction": saving / p["total_profiled_ms"], "label": "estimate",
+                    "derived_from": ["profile.json#%d" % i, "kernels.json#%d" % ki]})
+    return [e for e in out if e["length"] >= 1024] or out
+
+
+def implications(by_length, lat, profile, audit, floor, kernels, abtest=None) -> List[Dict[str, Any]]:
     """Which Phase 3 directions the data supports, weakens or leaves open, each tied to a measured cost."""
     out = []
+    fp = [(it["condition"]["total_tokens"], it["ratio_to_clean"]["fastpath_off"], i)
+          for i, it in _items(abtest) if (it.get("ratio_to_clean") or {}).get("fastpath_off")]
+    if fp:
+        best = min(fp, key=lambda x: x[1])
+        out.append({"direction": "run the decision head through Laya's SDPA attention instead of PyTorch's fast path",
+                    "stance": "supported" if best[1] < 0.95 else "open",
+                    "statement": stmt("hypothesized", "Turning the fast path off gave %s with identical answers (measured); "
+                                      "it needs no retraining and no change to the model's outputs."
+                                      % "; ".join("%.0f%% of clean p50 at %d tokens" % (100 * r, L) for L, r, _ in sorted(fp)),
+                                      ["abtest.json#%d" % i for _, _, i in fp])})
     profs = _profiles(profile)
     if by_length:
         last = by_length[-1]
-        lin = sum(c["share"] for c in last["components"] if c["component"] in LINEAR)
-        head = next((c["share"] for c in last["components"] if c["component"] == "decision_head"), 0.0)
+        mid = min(by_length, key=lambda b: abs(math.log(b["length"] / 2048)))
+        lin_mid = sum(c["share"] for c in mid["components"] if c["component"] in LINEAR)
+        lin_last = sum(c["share"] for c in last["components"] if c["component"] in LINEAR)
         out.append({"direction": "reduce the tokens that reach the encoder (compression, chunk selection)",
-                    "stance": "supported" if lin >= 0.5 else "open",
-                    "statement": stmt("hypothesized", "Projections and MLP take %s of time at %d tokens (measured); "
-                                      "only fewer tokens through the encoder reduces that share." % (_pct(lin), last["length"]),
-                                      last["derived_from"])})
+                    "stance": "supported" if lin_mid >= 0.5 else "open",
+                    "statement": stmt("hypothesized", "Projections and MLP take %s of time at %d tokens and %s at %d "
+                                      "tokens (measured). Faster attention cannot touch that part; only fewer tokens "
+                                      "through the encoder reduces it." % (_pct(lin_mid), mid["length"], _pct(lin_last),
+                                                                         last["length"]),
+                                      mid["derived_from"] + last["derived_from"])})
+        lin = lin_last
+        head = next((c["share"] for c in last["components"] if c["component"] == "decision_head"), 0.0)
         out.append({"direction": "restrict or shorten the decision head's full-sequence pass",
                     "stance": "supported" if head >= 0.05 else "weakened",
                     "statement": stmt("hypothesized", "The 2-layer head takes %s at %d tokens (measured)."
@@ -515,11 +616,26 @@ def implications(by_length, lat, profile, audit, floor, kernels) -> List[Dict[st
                     "statement": stmt("hypothesized", "Local layers run dense masked attention; their score/value work is %s "
                                       "of profiled time at %d tokens, most of which a real block-local kernel would remove.%s"
                                       % (_pct(sh), L, speed), [ref, "audit.json#executed_work_note"])})
+        est = local_kernel_saving(profile, kernels)
+        if est:
+            out.append({"direction": "estimated saving from a block-local kernel in the native local layers",
+                        "stance": "supported" if max(e["saving_fraction"] for e in est) >= 0.1 else "open",
+                        "estimates": est,
+                        "statement": stmt("estimated", "Replacing each native local layer's attention with the measured "
+                                          "block-local kernel (block 128) would save about %s. Each figure is n_local x "
+                                          "(native per-layer local time - kernel time), from separate processes, against "
+                                          "the profiled total. The kernel's pattern (own and neighbouring 128-token "
+                                          "blocks) covers more than the native +/-64 window, so an exact kernel needs "
+                                          "its own correctness check."
+                                          % "; ".join("%s of %s at %d tokens (%s)" % (_ms(e["saving_ms"]), _ms(e["profiled_ms"]),
+                                                                                     e["length"], _pct(e["saving_fraction"]))
+                                                      for e in est),
+                                          sorted({r for e in est for r in e["derived_from"]}))})
     multi = [r for r in lat["multi_and_batch"] if r["kind"] == "multi_question" and r.get("multiplier_vs_single")
              and r["status"] == "measured"]
     if multi:
         eff = [r["multiplier_vs_single"] / r["units"] for r in multi]
-        worst = max(multi, key=lambda r: r["units"])
+        worst = max(multi, key=lambda r: (r["units"], r["length"]))
         out.append({"direction": "encode the document once for several questions",
                     "stance": "supported" if min(eff) >= 0.7 else "open",
                     "statement": stmt("hypothesized", "Each extra question costs about a full forward pass: %d questions take "
@@ -529,7 +645,7 @@ def implications(by_length, lat, profile, audit, floor, kernels) -> List[Dict[st
     batch = [r for r in lat["multi_and_batch"] if r["kind"] == "batch" and r.get("multiplier_vs_single")
              and r["status"] == "measured"]
     if batch:
-        b = max(batch, key=lambda r: r["units"])
+        b = max(batch, key=lambda r: (r["units"], r["length"]))
         out.append({"direction": "batch documents for CPU throughput",
                     "stance": "weakened" if b["multiplier_vs_single"] >= 0.75 * b["units"] else "supported",
                     "statement": stmt("hypothesized", "A batch of %d documents takes %.1fx one document at %d tokens "
@@ -547,14 +663,19 @@ def implications(by_length, lat, profile, audit, floor, kernels) -> List[Dict[st
 
 # --------------------------------------------------------------------------- assembly
 
-def summary(lat, by_length, plan_assumptions, hypotheses, audit) -> List[Dict[str, Any]]:
+def summary(lat, by_length, plan_assumptions, hypotheses, audit, manifest=None) -> List[Dict[str, Any]]:
     out = []
-    meas = [r for r in lat["primary"] if r["status"] == "measured" and r["p50_ms"]]
+    variant = ((manifest or {}).get("runtime") or {}).get("variant")
+    if variant:
+        out.append(stmt("measured", "This run is the variant %s, not native Laya: its numbers never stand in for the "
+                        "native results (research.md R17)." % variant, ["manifest.json#runtime"]))
+    meas = [r for r in lat["primary"] if r["status"] in ("measured", "partial") and r["p50_ms"]]
     if meas:
         lo, hi = meas[0], meas[-1]
-        out.append(stmt("measured", "One document, one question: p50 %s at %d tokens and %s at %d tokens%s."
+        out.append(stmt("measured", "One document, one question: p50 %s at %d tokens and %s at %d tokens%s%s."
                         % (_ms(lo["p50_ms"]), lo["length"], _ms(hi["p50_ms"]), hi["length"],
-                           " (cost-only above the configured cap)" if hi["cost_only"] else ""), [lo["ref"], hi["ref"]]))
+                           " (partial: %s repeats)" % hi["n"] if hi["status"] == "partial" else "",
+                           ", cost-only above the configured cap" if hi["cost_only"] else ""), [lo["ref"], hi["ref"]]))
     if by_length:
         b = by_length[-1]
         top = b["components"][0]
@@ -584,7 +705,7 @@ def build_report(run_path: Union[str, Path]) -> Dict[str, Any]:
     if missing:
         raise ReportError("report needs %s in %s; run `audit` for this run first" % (" and ".join(missing), run))
     files = {n: _load(run, n) for n in ("sweep.json", "profile.json", "kernels.json", "floor.json",
-                                         "gpu_reference.json")}
+                                         "gpu_reference.json", "abtest.json")}
     sweep, profile, kernels, floor, gpu = (files[n] for n in ("sweep.json", "profile.json", "kernels.json",
                                                               "floor.json", "gpu_reference.json"))
     lat = latency_tables(sweep)
@@ -599,7 +720,7 @@ def build_report(run_path: Union[str, Path]) -> Dict[str, Any]:
     if gpu is None:
         not_run.append({"check": "gpu_reference.json", "reason": "GPU reference check not run (research.md R15)"})
     body = {
-        "summary": summary(lat, by_length, plan_assumptions, hypotheses, audit),
+        "summary": summary(lat, by_length, plan_assumptions, hypotheses, audit, manifest),
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "audit_summary": audit_summary(audit, manifest),
         "environment": environment(manifest) + sessions(files),
@@ -615,7 +736,7 @@ def build_report(run_path: Union[str, Path]) -> Dict[str, Any]:
         "drift": drift,
         "not_run": not_run,
         "reproduce": _read_commands(run),
-        "phase3_implications": implications(by_length, lat, profile, audit, floor, kernels),
+        "phase3_implications": implications(by_length, lat, profile, audit, floor, kernels, files.get("abtest.json")),
         "kernels_executed_work": ((kernels or {}).get("executed_work") or {}).get("groups", []),
         "statement_status": {"tags": list(TAGS), "rule": "every statement in report.md begins with its tag"},
     }
@@ -682,6 +803,10 @@ def render_markdown(body: Dict[str, Any], run_id: str) -> str:
         add("### %d tokens (clean p50 %s)%s" % (b["length"], _ms(b["clean_p50_ms"]),
                                                 "  - cost-only" if b["cost_only"] else ""))
         add("")
+        if b.get("clean_status") == "partial":
+            rp = b.get("clean_repeats") or {}
+            add("- [measured] The clean run here is partial (%s of %s repeats before the time cap); its p50 is "
+                "used with that caveat." % (rp.get("completed"), rp.get("requested")))
         for rank, c in enumerate(b["components"], 1):
             if c["share"] < 0.005:
                 continue
@@ -727,8 +852,13 @@ def render_markdown(body: Dict[str, Any], run_id: str) -> str:
             m["length"], _gb(m["score_matrix_bytes_analytical"]),
             {True: "would fit", False: "would not fit", None: "cannot be compared"}[m["full_matrix_fits_in_ram"]]))
         if m["native_peak_rss_bytes"] is not None or m["kernel_peak_rss_bytes"]:
-            add("- [measured] %d tokens: native peak %s%s. Paths that avoid materializing it: %s. (%s)" % (
-                m["length"], _gb(m["native_peak_rss_bytes"]),
+            mat = {"materialized": "; the peak grew %s above the smallest-length peak, consistent with full score "
+                                   "matrices being materialized" % _gb(m.get("native_growth_bytes")),
+                   "avoided": "; no growth of that size, so native Laya does not materialize it",
+                   "not_observable": "; a matrix this small is hidden under the model-load peak, so this cannot "
+                                     "tell whether it is materialized"}.get(m.get("native_materialization"), "")
+            add("- [measured] %d tokens: native peak %s%s%s. Paths that avoid materializing it: %s. (%s)" % (
+                m["length"], _gb(m["native_peak_rss_bytes"]), mat,
                 ", paging suspected" if m.get("paging_suspected") else "",
                 "; ".join(m["paths_avoiding_full_matrix"]) or "none measured", ", ".join(m["derived_from"])))
     add("")
@@ -763,8 +893,18 @@ def render_markdown(body: Dict[str, Any], run_id: str) -> str:
     add("## Drift-flagged conditions")
     add("")
     if body["drift"]["flagged"]:
+        groups: List[List[Dict[str, Any]]] = []
         for d in body["drift"]["flagged"]:
-            add("- [measured] %s: canary deviation %s." % (d["ref"], _pct(d["max_deviation"])))
+            f, n = d["ref"].split("#")
+            if groups and groups[-1][-1]["ref"].split("#")[0] == f and \
+                    int(groups[-1][-1]["ref"].split("#")[1]) == int(n) - 1 and \
+                    round(groups[-1][-1]["max_deviation"] or 0, 3) == round(d["max_deviation"] or 0, 3):
+                groups[-1].append(d)
+            else:
+                groups.append([d])
+        for g in groups:
+            ref = g[0]["ref"] if len(g) == 1 else "%s-%s" % (g[0]["ref"], g[-1]["ref"].split("#")[1])
+            add("- [measured] %s: canary deviation %s." % (ref, _pct(g[0]["max_deviation"])))
     else:
         add("- [measured] None flagged%s." % ("" if body["drift"]["canary"] else " (no canary in this run)"))
     add("")

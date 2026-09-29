@@ -217,3 +217,61 @@ file only in the note on the reference's hardware. It does not rank, profile or 
 **Interpretation rule, fixed before running**: a 512-token GPU p50 within 2x of 33 ms (under about 66 ms) is
 consistent with the reference being a GPU figure; far above that leaves the reference's hardware unexplained
 and the report says so.
+
+## R16. Findings of the full run that change the method
+
+**Profiled runs were faster than clean runs.** Profiled total over clean p50 was 1.00 at 128 tokens, then
+0.85, 0.80, 0.80, 0.88 and 0.71 from 512 to 8,192 tokens (run `full`). Timings are flat within every
+condition, and the canaries show both sessions at the same machine speed, so drift does not explain it. The
+wrappers-only overhead check (T029) was 0.99, so any effect comes from the module hooks or the profiler.
+Component shares come from profiled runs; if instrumentation changes which kernel PyTorch runs, the shares are
+biased. **Decision**: an `abtest` command times the same documents in one process, interleaving five modes
+(clean, wrappers, labels, profiler, all) with a rotating order, and records the thread count after every call.
+The report states the per-length gap and the A/B ratios. Until the A/B test is run, the component shares are
+reported with this caveat.
+
+**Peak memory cannot see small allocations.** Peak working set is a process-lifetime maximum, and loading the
+model already peaks at about 2.9 GB. A score matrix smaller than about 10% of that peak (below about 4,096
+tokens here) cannot be seen, which is why the smoke run's 2,048-token result suggested, wrongly, that no score
+matrix is materialized. At 4,096 and 8,192 tokens the peak grew by 1.6 GB and 8.0 GB, consistent with full
+fp32 score matrices being materialized (8.0 GB is about two 4.3 GB matrices), and two 8,192-token runs failed
+allocating exactly rows x 16 heads x 8192^2 x 4 bytes. **Decision**: the report classifies each length as
+`materialized`, `avoided` or `not_observable`, and never infers avoidance from growth below that floor.
+
+**A partial clean run may anchor a ranking.** At 8,192 tokens the clean run completed 8 of 10 repeats before
+the time cap. A partial clean item with at least 5 repeats may anchor that length's ranking, and the report
+labels it as partial. Fewer repeats leave the length unranked and listed.
+
+## R17. The decision head's fast path
+
+**Finding (A/B test, run `full`)**: with the same documents in one process, module hooks alone made requests
+17% faster at 2,048 tokens (p50 ratio 0.834) and 32% faster at 8,192 (0.678); stage wrappers (1.00) and the
+profiler (1.00-1.02) changed nothing. Every hooked sample was faster than every unhooked one, whatever the order.
+
+**Mechanism**: Laya's decision head is built from `nn.TransformerEncoderLayer`. In inference, with no hooks on
+the layer or its children, PyTorch takes an inference fast path (`torch._transformer_encoder_layer_fwd`) that
+bypasses Laya's `_DynamicMultiheadAttention` (SDPA) and runs `_native_multi_head_attention` with
+`_masked_softmax`, which materializes the full L x L scores per head on CPU. A hook on the layer disables the fast
+path (PyTorch checks for hooks explicitly). Checked on the real head shape (16 heads, hidden 1024) in isolation:
+one head layer takes 2.2x as long at 2,048 tokens and 2.4x at 4,096 on the fast path, and the two paths agree to
+5e-7 on every real token. The fixture model never showed this because its head has one attention head, and the
+fast path needs an even count.
+
+**Consequences**:
+- The clean latency of native Laya includes the fast path; that is the real deployment cost, so the sweep stands.
+- The original profile runs hooked the head and so measured a faster head than the clean runs use. That is the
+  profiled/clean gap of R16. Encoder components are unaffected; the decision-head share was understated.
+- The full score matrices behind the 8,192-token memory growth and the two out-of-memory failures are likely the
+  head's fast path, not the encoder (to be confirmed by the variant run below).
+
+**Decisions**:
+- `profile` no longer hooks head layers when they would take the fast path (`profile.head_takes_fastpath`); it
+  recognizes the fast-path operator and attributes it to `decision_head` (`head_attention` for
+  `_native_multi_head_attention` / `_masked_softmax`). Each profile item records `head_path`.
+- A common option `--mha-fastpath on|off` (default `on`, native Laya) sets `torch.backends.mha` in every
+  measuring process. `off` is a labelled variant (`runtime.variant = mha_fastpath_off` in the manifest), allowed
+  only in its own run directory, and never reported as native. `laya/` stays unchanged: this is a PyTorch
+  runtime setting, and outputs are equivalent within fp32 rounding.
+- `abtest` gains `fastpath_off` (no hooks, fast path off) and `labels_encoder` (hooks on the encoder only,
+  the fixed profile path). Expected if the mechanism is right: `labels_encoder` about 1.0 and `fastpath_off`
+  about equal to the old `labels` ratio.

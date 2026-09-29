@@ -72,7 +72,8 @@ def assert_clean(agent) -> Dict[str, Any]:
     if problems:
         raise CleanPathError("clean timing refused: " + "; ".join(problems))
     return {"instance_overrides": [], "collate_patched": False, "prediction_hooks": 0,
-            "module_hooks": 0, "profiler_active": False}
+            "module_hooks": 0, "profiler_active": False,
+            "mha_fastpath": bool(torch.backends.mha.get_fastpath_enabled())}
 
 
 def _call(agent, kind: str, states, questions, max_len: int):
@@ -196,9 +197,11 @@ def measure_condition(spec: Dict[str, Any]) -> Dict[str, Any]:
     from .runner import load_agent
     started = time.perf_counter()
     agent, info = load_agent(spec["model"], spec.get("revision"), spec.get("threads"),
-                             compile=bool(spec.get("compile", False)))
+                             compile=bool(spec.get("compile", False)),
+                             mha_fastpath=bool(spec.get("mha_fastpath", True)))
     rec = measure_in_process(agent, spec, info, started=started)
     rec["model"] = {"id": info["model"], "revision": info["revision"]}
+    rec["mha_fastpath"] = info["mha_fastpath"]
     return rec
 
 
@@ -214,7 +217,8 @@ def compare_paths(spec: Dict[str, Any], agent=None) -> Dict[str, Any]:
     info = None
     if agent is None:
         from .runner import load_agent
-        agent, info = load_agent(spec["model"], spec.get("revision"), spec.get("threads"))
+        agent, info = load_agent(spec["model"], spec.get("revision"), spec.get("threads"),
+                                 mha_fastpath=bool(spec.get("mha_fastpath", True)))
     s = _spec_ints(spec)
     kind = condition_kind(s["nq"], s["batch"])
     reqs = [build_request(agent, s["total"], s["seed"] + r, s["nq"], s["opts"], s["batch"])

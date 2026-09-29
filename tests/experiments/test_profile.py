@@ -103,3 +103,28 @@ def test_profile_command_merges_clean_and_updates_audit(tiny_checkpoint, tmp_pat
     audit = results.read_json(tmp_path / "p", "audit.json")
     assert audit["executed_work_note"]["verdict"] in ("verified", "dense_masked", "not_yet_determined")
     assert audit["executed_work_note"]["derived_from"] == ["profile.json#scaling"]
+
+
+def test_abtest_interleaves_modes_and_reports_ratios(tiny_agent):
+    from experiments import abtest
+    n = len(abtest.MODES)
+    r = abtest.abtest_in_process(tiny_agent, {"total_tokens": 256, "repeats": n})
+    assert r["status"] == "measured" and r["kind"] == "abtest"
+    assert set(r["timings_ms"]) == set(abtest.MODES)
+    assert r["ratio_to_clean"]["clean"] == 1.0
+    assert all(len(v) == n for v in r["samples_ms"].values())
+    assert [o[0] for o in r["order"]] == list(abtest.MODES)  # every mode leads once
+    assert all(t >= 1 for ts in r["threads_after_call"].values() for t in ts)
+    from experiments.timing import assert_clean
+    assert_clean(tiny_agent)  # nothing left attached
+
+
+def test_abtest_command(tiny_checkpoint, tmp_path, monkeypatch):
+    from experiments import cli, results
+    monkeypatch.setattr(results, "RESULTS_ROOT", tmp_path)
+    assert cli.main(["abtest", "--run-id", "ab", "--model", tiny_checkpoint, "--threads", "1",
+                     "--lengths", "128", "--repeats", "2", "--modes", "clean,all"]) == 0
+    body = results.read_json(tmp_path / "ab", "abtest.json")
+    assert body["items"][0]["status"] == "measured" and set(body["items"][0]["ratio_to_clean"]) == {"clean", "all"}
+    assert cli.main(["abtest", "--run-id", "ab", "--model", tiny_checkpoint, "--threads", "1",
+                     "--modes", "all"]) == cli.EXIT_TOOL_ERROR  # clean is required

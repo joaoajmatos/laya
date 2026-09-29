@@ -350,7 +350,7 @@ def resolve_model_revision(model: str, revision: Optional[str]) -> Tuple[Optiona
 
 
 def load_agent(model: str, revision: Optional[str] = None, threads: Optional[int] = None,
-               compile: bool = False):
+               compile: bool = False, mha_fastpath: bool = True):
     """Load `laya.Agent` on CPU and return ``(agent, info)``.
 
     Raises if the effective device is not CPU. `info` records load time, the thread count, the
@@ -364,6 +364,9 @@ def load_agent(model: str, revision: Optional[str] = None, threads: Optional[int
         if threads < 1:
             raise ValueError("threads must be >= 1, got %d" % threads)
         torch.set_num_threads(threads)
+    # PyTorch's nn.TransformerEncoderLayer fast path (research.md R17). On (the default) is native Laya;
+    # off is a labelled variant that routes the decision head through Laya's own SDPA attention.
+    torch.backends.mha.set_fastpath_enabled(bool(mha_fastpath))
     captured = io.StringIO()
     started = time.perf_counter()
     try:
@@ -393,6 +396,7 @@ def load_agent(model: str, revision: Optional[str] = None, threads: Optional[int
         "dtype": str(agent.dtype).replace("torch.", ""),
         "amp_enabled": bool(agent.amp_enabled),
         "compile": bool(compile),
+        "mha_fastpath": bool(torch.backends.mha.get_fastpath_enabled()),
         "cpu_fallback_count": int(getattr(agent, "cpu_fallback_count", 0) or 0),
         "last_fallback_reason": getattr(agent, "last_fallback_reason", None),
         "fallback_messages": fallback_messages,

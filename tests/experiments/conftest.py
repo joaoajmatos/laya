@@ -72,8 +72,12 @@ def _build_tokenizer(out_dir):
     return fast
 
 
-def build_fixture_checkpoint(root):
-    """Write the tiny checkpoint into `root` and return its path."""
+def build_fixture_checkpoint(root, hidden: int = 64):
+    """Write the tiny checkpoint into `root` and return its path.
+
+    ``hidden=128`` gives the decision head 2 attention heads (Laya uses hidden // 64), an even count,
+    so PyTorch's TransformerEncoderLayer fast path is taken as on the real model (research.md R17).
+    """
     import torch
     from safetensors.torch import save_file
     from transformers import ModernBertConfig
@@ -90,7 +94,7 @@ def build_fixture_checkpoint(root):
         sep_token_id=tok.sep_token_id,
         bos_token_id=tok.cls_token_id,
         eos_token_id=tok.sep_token_id,
-        **FIXTURE_ENCODER,
+        **dict(FIXTURE_ENCODER, hidden_size=hidden, intermediate_size=2 * hidden),
     )
     enc_dir = os.path.join(root, "encoder")
     ecfg.save_pretrained(enc_dir)
@@ -126,3 +130,15 @@ def tiny_agent(tiny_checkpoint):
     """A `laya.Agent` on the fixture, CPU only."""
     import laya
     return laya.Agent(tiny_checkpoint, device="cpu")
+
+
+@pytest.fixture(scope="session")
+def fastpath_checkpoint(tmp_path_factory):
+    """Fixture whose decision head takes PyTorch's fast path (an even number of heads)."""
+    return build_fixture_checkpoint(str(tmp_path_factory.mktemp("tiny-laya-fastpath")), hidden=128)
+
+
+@pytest.fixture(scope="session")
+def fastpath_agent(fastpath_checkpoint):
+    import laya
+    return laya.Agent(fastpath_checkpoint, device="cpu")

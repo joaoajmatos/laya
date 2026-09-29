@@ -13,6 +13,7 @@ Directory: `experiments/results/<run_id>/` (git-ignored, constitution V).
 | `report.json` | `report` | Bottleneck Ranking |
 | `report.md` | `report` | Human-readable report of the same content |
 | `commands.txt` | every command | The exact command line, appended |
+| `abtest.json` | `abtest` | Instrumentation A/B timings (research.md R16) |
 | `gpu_reference.json` | `gpu-reference` | GPU-only timings of native Laya (research.md R15); never a CPU result |
 
 ## Rules

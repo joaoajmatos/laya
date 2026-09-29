@@ -169,7 +169,9 @@ def test_audit_memory_and_floor_sections(run):
     m = mem[2048]
     assert m["score_matrix_bytes_analytical"] == 16 * 2048 * 2048 * 4
     assert m["native_peak_rss_bytes"] == 3e9 and m["kernel_peak_rss_bytes"] == {"local/b128": 5e8}
-    assert m["full_matrix_fits_in_ram"] is True and m["paths_avoiding_full_matrix"]
+    assert m["full_matrix_fits_in_ram"] is True
+    assert m["native_materialization"] == "not_observable"   # 0.27 GB is under 10% of the 3 GB load peak
+    assert m["paths_avoiding_full_matrix"] == []             # the kernel's 0.5 GB peak is above 0.27 GB
     assert mem[8192]["native_peak_rss_bytes"] is None
     assert any(n["check"] == "memory measurement at 8192 tokens" for n in body["not_run"])
     assert [f["length"] for f in body["cost_floor"]] == [512, 2048]
@@ -217,3 +219,30 @@ def test_all_command_on_fixture(tiny_checkpoint, tmp_path, monkeypatch):
     text = (tmp_path / "a" / "report.md").read_text(encoding="utf-8")
     assert "tiny test fixture" in text and "## Bottlenecks by length" in text
     assert "python -m experiments all" in text
+
+
+def test_materialization_is_detected_only_when_observable(run):
+    sw = results.read_json(run, "sweep.json")
+    sw["items"][4] = single(8192, 75000.0, status="partial", beyond=True, rss=11e9, reason="time cap reached after 8 of 10 repeats")
+    sw["items"][4]["repeats"] = {"requested": 10, "completed": 8}
+    results.write_json(run, "sweep.json", {k: v for k, v in sw.items() if k not in ("schema_version", "run_id")})
+    body = R.build_report(run)
+    mem = {m["length"]: m for m in body["memory_feasibility"]}
+    assert mem[8192]["native_materialization"] == "materialized"
+    assert mem[8192]["native_growth_bytes"] == pytest.approx(8e9)
+    assert mem[512]["native_materialization"] == "not_observable"
+    h5 = next(h for h in body["hypotheses"] if h["id"] == "H5")
+    assert h5["verdict"] == "confirmed"
+
+
+def test_local_kernel_saving_estimate(run):
+    prof = results.read_json(run, "profile.json")
+    prof["items"][1]["score_value_by_layer_type"] = {"local": {"n_layers": 18, "per_layer_ms": 73.7, "total_ms": 1326.6}}
+    results.write_json(run, "profile.json", {k: v for k, v in prof.items() if k not in ("schema_version", "run_id")})
+    body = R.build_report(run)
+    est = next(i for i in body["phase3_implications"] if i["direction"].startswith("estimated saving"))
+    (e,) = est["estimates"]
+    assert e["length"] == 2048 and e["saving_ms"] == pytest.approx(18 * (73.7 - 30.0))
+    assert e["saving_fraction"] == pytest.approx(18 * 43.7 / 7300) and e["label"] == "estimate"
+    assert est["statement"]["tag"] == "estimated"
+    assert "kernels.json#0" in est["statement"]["derived_from"]
