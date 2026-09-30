@@ -7,7 +7,6 @@ children run in-process (one test uses a real subprocess) so nothing needs the n
 Timings and accuracies here exercise the tooling only; they are never measurements.
 """
 import contextlib
-import importlib
 import io
 import json
 import shutil
@@ -15,18 +14,13 @@ import shutil
 import pytest
 
 from experiments import cli, data, evalrun, families, results, runner
+from tests.experiments.conftest import run_condition_in_process
 
 REAL_RUN_CONDITION = runner.run_condition
 
 LENGTHS = "256,512,1024"
 VARIANTS = "neutral@mid,distractor@begin,distractor@mid,distractor@end"
 MAX_CASES = "3"
-
-
-def in_process(function, spec, time_cap=None, grace=None):
-    """Stand-in for `runner.run_condition`: the same child function, no subprocess."""
-    module, name = function.split(":")
-    return getattr(importlib.import_module(module), name)(dict(spec, time_cap=spec.get("time_cap", time_cap)))
 
 
 class Env:
@@ -73,7 +67,7 @@ def patched(tiny_upstream, tmp_path_factory):
     res = tmp_path_factory.mktemp("cli-results")
     mp.setattr(results, "RESULTS_ROOT", res)
     mp.setattr(data, "_hf_download", lambda revision: tiny_upstream.download)
-    mp.setattr(runner, "run_condition", in_process)
+    mp.setattr(runner, "run_condition", run_condition_in_process)
     yield res
     mp.undo()
 

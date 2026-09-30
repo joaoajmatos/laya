@@ -247,3 +247,47 @@ class TinyUpstream:
 def tiny_upstream(tmp_path_factory):
     root = str(tmp_path_factory.mktemp("tiny-upstream"))
     return TinyUpstream(root, write_tiny_upstream(root))
+
+
+# --------------------------------------------------------------------------- in-process measuring children
+
+def run_condition_in_process(function, spec, time_cap=None, grace=None):
+    """`runner.run_condition` without the subprocess: same child function, same item shape.
+
+    Starting a Python child costs a fresh ``import torch`` (about 10 s on a cold Windows machine), which dominates
+    the CLI tests. The subprocess path itself stays covered by test_runner.py and by one real-child test per command
+    family; tests that only check what a command *orchestrates* use this instead (`in_process_children`).
+    """
+    import time
+    import traceback
+    from experiments import runner
+    from experiments.results import Status
+
+    spec = dict(spec)
+    if time_cap is not None:
+        spec["time_cap"] = float(time_cap)
+    base = {"runner": {"function": function}}
+    started = time.perf_counter()
+    try:
+        payload = runner.resolve_function(function)(spec)
+    except Exception as exc:
+        item = dict(base, status=Status.FAILED.value, cause="exception", signal=None, exit_code=1,
+                    exception_type=type(exc).__name__, reason="%s: %s" % (type(exc).__name__, exc),
+                    traceback=traceback.format_exc(limit=20))
+        item.update(runner._memory_fields(runner.peak_memory()))
+        item["runner"]["elapsed_s"] = time.perf_counter() - started
+        return item
+    item = dict(base)
+    item.update(payload)
+    item.setdefault("status", Status.MEASURED.value)
+    item.update(runner._memory_fields(runner.peak_memory()))
+    item["exit_code"] = 0
+    item["runner"]["elapsed_s"] = time.perf_counter() - started
+    return item
+
+
+@pytest.fixture()
+def in_process_children(monkeypatch):
+    """Run measuring children inside the test process (see `run_condition_in_process`)."""
+    from experiments import runner
+    monkeypatch.setattr(runner, "run_condition", run_condition_in_process)

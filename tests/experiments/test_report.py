@@ -206,7 +206,9 @@ def test_gpu_reference_only_in_the_reference_note(run):
         assert all("gpu" not in r for c in b["components"] for r in c["derived_from"])
 
 
-def test_all_command_on_fixture(tiny_checkpoint, tmp_path, monkeypatch):
+def test_all_command_on_fixture(tiny_checkpoint, tmp_path, monkeypatch, in_process_children):
+    # `all` chains audit, sweep, profile, kernels and report; each of those commands is tested with real child
+    # processes in its own module, so the chain runs its children in-process (that took 6 of the suite's 19 minutes).
     monkeypatch.setattr(results, "RESULTS_ROOT", tmp_path)
     code = cli.main(["all", "--run-id", "a", "--model", tiny_checkpoint, "--threads", "1",
                      "--lengths", "128,256,512", "--questions", "1,2", "--batch-sizes", "1",

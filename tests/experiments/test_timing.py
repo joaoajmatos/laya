@@ -132,7 +132,8 @@ def test_sweep_command_records_everything(tiny_checkpoint, tmp_path, monkeypatch
     assert len(single) == 1  # multi-question never lands in the single-request curve
 
 
-def test_sweep_canary_block_and_drift_annotation(tiny_checkpoint, tmp_path, monkeypatch):
+def test_sweep_canary_block_and_drift_annotation(tiny_checkpoint, tmp_path, monkeypatch, in_process_children):
+    # Canary bookkeeping is orchestration; real child processes are exercised by the sweep tests around it.
     monkeypatch.setattr(results, "RESULTS_ROOT", tmp_path)
     code = cli.main(["sweep", "--run-id", "c", "--model", tiny_checkpoint, "--threads", "1",
                      "--lengths", "128,256", "--questions", "1", "--batch-sizes", "1",
