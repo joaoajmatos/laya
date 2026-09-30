@@ -534,3 +534,15 @@ def test_phase2_all_stops_at_the_audit_gate(tiny_checkpoint, patched, tmp_path, 
     assert "== data-import ==" in r.out and "stopped at the audit gate" in r.out and "audit_required" in r.out
     assert "== eval" not in r.out
     assert (tmp_path / "all" / "audit_sheet.json").exists() and (tmp_path / "all" / "splits.json").exists()
+
+
+def test_solvability_runs_the_named_checkpoints_and_rejects_unknown_ones(built, monkeypatch):
+    env, _ = built
+    monkeypatch.setattr(evalrun, "CHECKPOINTS", {"fine_tuned": str(env.ckpt), "base": str(env.ckpt)})
+    bad = env.run("solvability", "--models", "nope", run_id="solv")
+    assert bad.code == cli.EXIT_TOOL_ERROR and "unknown checkpoint names" in bad.err
+    r = env.run("solvability", "--models", "fine_tuned", run_id="solv")
+    assert r.code == 0, r
+    body = json.loads((env.run_dir("solv") / "solvability.json").read_text(encoding="utf-8"))
+    assert "fine_tuned" in body["models"] and body["split"] == "dev"
+    assert "reference checkpoint:" in r.out and "fine_tuned: accuracy" in r.out
