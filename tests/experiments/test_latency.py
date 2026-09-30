@@ -88,6 +88,16 @@ def test_selection_is_inside_the_timed_call(fam, monkeypatch):
     assert rec["status"] == "measured" and rec["timings_ms"]["p50"] >= 50.0
 
 
+def test_the_oracle_is_computed_for_every_timed_call_not_served_from_its_quality_cache(fam, monkeypatch):
+    import laya
+    calls = []
+    real = laya.Agent.predict
+    monkeypatch.setattr(laya.Agent, "predict", lambda self, *a, **k: (calls.append(1), real(self, *a, **k))[1])
+    rec = L.latency_condition(spec(fam, cond("oracle", 512), repeats=2, warmup=1))
+    assert rec["status"] == "measured" and len(rec["samples_ms"]) == 2 * N
+    assert len(calls) == 1 + 2 * N                    # a warmup call and every timed call reach the model
+
+
 def test_windowing_is_inside_the_timed_call_and_accounting_is_not(fam, monkeypatch):
     from experiments import tokens
     monkeypatch.setattr(tokens, "account", lambda *a, **k: (_ for _ in ()).throw(AssertionError("timed path")))

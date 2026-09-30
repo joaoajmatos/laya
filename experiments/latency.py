@@ -84,6 +84,8 @@ def latency_condition(spec: Dict[str, Any]) -> Dict[str, Any]:
     else:
         agent, info, _ = V.load_for_variant(spec["model"], spec.get("revision"), spec.get("threads"), cond["variant"])
     runner = build_runner(cond["name"], cond["params"])
+    if hasattr(runner, "use_cache"):
+        runner.use_cache = False
     warmup = int(spec.get("warmup", WARMUP_DEFAULT))
     reps_spec = spec.get("repeats")
     repeats = default_repeats(cond["length"]) if reps_spec in (None, "auto") else int(reps_spec)

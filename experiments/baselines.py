@@ -289,6 +289,8 @@ class OracleRunner(NativeRunner):
     def __init__(self):
         super().__init__(max_len=None)
         self._cache: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        #: Latency runs switch this off: a cached answer would time a dictionary lookup, not a model call.
+        self.use_cache = True
 
     @staticmethod
     def oracle_text(item: Dict[str, Any]) -> str:
@@ -298,7 +300,7 @@ class OracleRunner(NativeRunner):
 
     def run(self, agent, item):
         key = (item["case_id"], item["question_id"], str(item.get("option_order")))
-        if key not in self._cache:
+        if not self.use_cache or key not in self._cache:
             qid = item["question_id"]
             cap = int(agent.cfg.get("max_len", 512))
             text = self.oracle_text(item)
