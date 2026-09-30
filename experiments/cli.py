@@ -1268,6 +1268,8 @@ def _cmd_phase2_all(args: argparse.Namespace) -> int:
         ns.threads_source = args.threads_source
         ns.run_path = args.run_path
         print("== %s ==" % s, flush=True)
+        if ns.run_id is None and COMMANDS[ns.command].default_run_id:     # as `main` does for a direct call
+            ns.run_id = COMMANDS[ns.command].default_run_id
         resolve_common(ns)
         code = COMMANDS[ns.command].run(ns)
         if code:

@@ -26,6 +26,15 @@ def pipeline(monkeypatch, tmp_path):
     return run
 
 
+def test_data_steps_log_to_the_stable_data_run_not_a_fresh_timestamp_directory(pipeline, tmp_path):
+    seen = pipeline("--run-id", "p2")
+    by_command = {ns.command: ns for ns in seen}
+    for name in ("data-import", "splits", "length-profile", "families", "audit-sample"):
+        assert by_command[name].run_id == "data", name
+    assert by_command["solvability"].run_id == "p2"
+    assert sorted(p.name for p in (tmp_path / "results").iterdir()) == ["data", "p2"]
+
+
 def test_steps_receive_the_seed_threads_and_model_given_to_phase2_all(pipeline):
     seen = pipeline("--run-id", "p2", "--seed", "7", "--threads", "3", "--model", "some/model")
     assert seen and {ns.seed for ns in seen} == {7}
