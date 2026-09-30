@@ -240,11 +240,31 @@ class SplitLocked(Refusal):
         super().__init__("split_locked", message)
 
 
+def _drop_partial_tail(path: Path) -> None:
+    """Cut a last line that an interrupted append left without its newline.
+
+    `read_jsonl` skips such a fragment, but an append glued onto it would corrupt the new record too.
+    """
+    try:
+        with open(path, "rb+") as f:
+            if f.seek(0, 2) == 0:
+                return
+            f.seek(-1, 2)
+            if f.read(1) == b"\n":
+                return
+            f.seek(0)
+            data = f.read()
+            f.truncate(data.rfind(b"\n") + 1)
+    except FileNotFoundError:
+        pass
+
+
 def append_jsonl(path: Union[str, Path], record: Dict[str, Any]) -> None:
     """Append one JSON object as one line; earlier lines are never rewritten."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(_jsonable(record), ensure_ascii=False, allow_nan=False)
+    _drop_partial_tail(path)
     with open(path, "a", encoding="utf-8", newline="\n") as f:
         f.write(line + "\n")
         f.flush()

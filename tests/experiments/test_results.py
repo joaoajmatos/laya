@@ -153,6 +153,17 @@ def test_assert_no_final_raises_split_locked():
     assert isinstance(err.value, R.Refusal)
 
 
+def test_an_append_after_an_interrupted_write_does_not_swallow_the_new_record(tmp_path):
+    """A child killed mid-append leaves a partial last line; the resumed run's first record must survive."""
+    path = tmp_path / "predictions.jsonl"
+    R.append_jsonl(path, {"item_id": "a"})
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write('{"item_id": "b", "corr')                       # cut short, no newline
+    R.append_jsonl(path, {"item_id": "c"})                       # the resumed run
+    R.append_jsonl(path, {"item_id": "d"})
+    assert [r["item_id"] for r in R.read_jsonl(path)] == ["a", "c", "d"]
+
+
 def test_phase2_command_defaults_do_not_leak_into_phase1_commands():
     """Regression (2026-09-29): set_defaults on a Phase 2 subparser changed --model for every command."""
     from experiments import cli
