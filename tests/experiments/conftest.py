@@ -142,3 +142,108 @@ def fastpath_checkpoint(tmp_path_factory):
 def fastpath_agent(fastpath_checkpoint):
     import laya
     return laya.Agent(fastpath_checkpoint, device="cpu")
+
+
+# --------------------------------------------------------------------------- T003: synthetic upstream dataset
+
+UPSTREAM_WORKFLOWS = ["agent_trace_observability", "customer_service", "invoice_processing", "security_incidents"]
+#: This workflow gets long states, so some question rows exceed a small named length.
+LONG_WORKFLOW = "security_incidents"
+TINY_TRAIN_PER_WORKFLOW = 12
+TINY_TEST_PER_WORKFLOW = 10
+
+_TINY_QUESTIONS = {
+    "action": {"type": "choice", "instructions": "which option best matches the document",
+               "criteria": {"continue": "proceed with the request", "review": "open a review",
+                            "stop": "halt the request"}},
+    "outcome": {"type": "choice", "instructions": "how did the request end",
+                "criteria": {"success": "the request was done", "failure": "the request failed"}},
+    "needs_review": {"type": "noul", "instructions": "this document needs review",
+                     "criteria": {"false": "no review is needed", "true": "a review is needed"}},
+    "risk": {"type": "score", "instructions": "how risky is the request",
+             "criteria": ["zero risk", "low risk", "high risk"]},
+    "urgency": {"type": "score", "instructions": "how urgent is the request",
+                "criteria": ["not urgent", "normal", "urgent", "very urgent"]},
+}
+
+
+def _tiny_probs(rng, k):
+    raw = [rng.random() ** 2 + 0.02 for _ in range(k)]
+    total = sum(raw)
+    return [round(v / total, 6) for v in raw]
+
+
+def make_upstream_case(workflow, split, index, seed=0):
+    """One case in the upstream schema (JSON columns as strings), fully seeded."""
+    rng = random.Random("%s|%s|%d|%d" % (workflow, split, index, seed))
+
+    def phrase(n):
+        return " ".join(rng.choice(_WORDS) for _ in range(n))
+
+    long = workflow == LONG_WORKFLOW
+    state = {"task": phrase(140 if long else 10), "customer": phrase(3),
+             "status": rng.choice(["open", "closed", "late"]), "amount": rng.randint(1, 9),
+             "note": phrase(60 if long else 6)}
+    questions = json.loads(json.dumps(_TINY_QUESTIONS))
+    gold, agreement = {}, {}
+    for qid, q in questions.items():
+        if q["type"] == "choice":
+            keys = list(q["criteria"])
+            probs = _tiny_probs(rng, len(keys))
+            label = keys[probs.index(max(probs))]
+            gold[qid] = {"type": "choice", "label": label, "probabilities": dict(zip(keys, probs))}
+        elif q["type"] == "noul":
+            p = _tiny_probs(rng, 2)
+            gold[qid] = {"type": "noul", "label": "true" if p[1] > p[0] else "false",
+                         "noul": p[1], "probabilities": {"false": p[0], "true": p[1]}}
+        else:
+            k = len(q["criteria"])
+            probs = _tiny_probs(rng, k)
+            label = str(probs.index(max(probs)))
+            gold[qid] = {"type": "score", "label": label, "score": round(sum(i * v for i, v in enumerate(probs)), 6),
+                         "probabilities": {str(i): v for i, v in enumerate(probs)}}
+        gold[qid]["confidence"] = round(0.3 + 0.6 * rng.random(), 6)
+        agreement[qid] = {"argmax_agree": rng.random() < 0.6, "argmax_majority": gold[qid]["label"],
+                          "total_variation": round(rng.random() * 0.6, 6)}
+    return {"id": "%s_%06d" % (workflow, index), "workflow": workflow, "split": split,
+            "state": json.dumps(state), "questions": json.dumps(questions), "gold": json.dumps(gold),
+            "factors": json.dumps({"seed": index}), "label_agreement": json.dumps(agreement),
+            "n_questions": len(questions)}
+
+
+def write_tiny_upstream(root, n_train=TINY_TRAIN_PER_WORKFLOW, n_test=TINY_TEST_PER_WORKFLOW, seed=0):
+    """Write the upstream repository layout (parquet) under `root`; returns the rows by split."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    rows = {"train": [], "test": []}
+    for wf in UPSTREAM_WORKFLOWS:
+        for split, n in (("train", n_train), ("test", n_test)):
+            rows[split] += [make_upstream_case(wf, split, i, seed) for i in range(n)]
+
+    def dump(rel, subset):
+        path = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        pq.write_table(pa.Table.from_pylist(subset), path)
+
+    for split in ("train", "test"):
+        dump("all/%s-00000-of-00001.parquet" % split, rows[split])
+        for wf in UPSTREAM_WORKFLOWS:
+            dump("%s/%s-00000-of-00001.parquet" % (wf, split), [r for r in rows[split] if r["workflow"] == wf])
+    return rows
+
+
+class TinyUpstream:
+    """The synthetic dataset, with a `download(relpath)` that never touches the network."""
+
+    def __init__(self, root, rows):
+        self.root, self.rows = root, rows
+
+    def download(self, relpath):
+        return os.path.join(self.root, relpath)
+
+
+@pytest.fixture(scope="session")
+def tiny_upstream(tmp_path_factory):
+    root = str(tmp_path_factory.mktemp("tiny-upstream"))
+    return TinyUpstream(root, write_tiny_upstream(root))

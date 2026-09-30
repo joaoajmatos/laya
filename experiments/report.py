@@ -268,8 +268,8 @@ def assumptions(audit, sweep, profile, gpu) -> Tuple[List[Dict[str, Any]], List[
                     "derived_from": [ref]})
 
     # A2: 512 tokens near 33 ms
-    caveat = ("The ~33 ms figure's hardware is not stated; Laya's own runtime message gives ~35 ms on GPU "
-              "and ~200-500 ms on CPU, so it is most likely a GPU figure.")
+    caveat = ("The ~33 ms figure is a GPU figure: upstream's model card reports 32.8 ms (multilingual) and "
+              "39.5 ms (English) per single question on a Tesla T4 GPU. It is not a CPU baseline.")
     s512 = singles.get(512)
     gpu512 = None
     for i, it in _items(gpu):

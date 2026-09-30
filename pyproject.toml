@@ -18,13 +18,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-experiments = ["pytest>=7"]
+experiments = ["pytest>=7", "pyarrow>=14"]
 
 [tool.setuptools]
 packages = ["laya"]
 
 [project.urls]
-Source = "https://github.com/<your-org>/laya-sparse"
+Source = "https://github.com/joaoajmatos/laya-sparse"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

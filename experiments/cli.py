@@ -32,18 +32,21 @@ class Command:
     help: str
     run: Callable[[argparse.Namespace], Optional[int]]
     add_arguments: Optional[Callable[[argparse.ArgumentParser], None]] = None
+    #: run directory used when `--run-id` is not given (Phase 2 data commands log to one stable place)
+    default_run_id: Optional[str] = None
 
 
 #: name -> Command, in registration order.
 COMMANDS: Dict[str, Command] = {}
 
 
-def command(name: str, help: str, add_arguments: Optional[Callable[[argparse.ArgumentParser], None]] = None):
+def command(name: str, help: str, add_arguments: Optional[Callable[[argparse.ArgumentParser], None]] = None,
+            default_run_id: Optional[str] = None):
     """Decorator registering `run(args)` as a subcommand."""
     def register(run):
         if name in COMMANDS:
             raise ValueError("command %r registered twice" % name)
-        COMMANDS[name] = Command(name, help, run, add_arguments)
+        COMMANDS[name] = Command(name, help, run, add_arguments, default_run_id)
         return run
     return register
 
@@ -90,9 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Phase 1 CPU path audit and measurement for Laya (specs/001-cpu-path-audit).",
     )
     sub = parser.add_subparsers(dest="command", metavar="<command>")
-    parent = common_parser()
     for cmd in COMMANDS.values():
-        sp = sub.add_parser(cmd.name, help=cmd.help, description=cmd.help, parents=[parent])
+        # A fresh copy of the common options per command: `parents=` shares the Action objects, so a
+        # command that changes a default (Phase 2 commands default to the fine-tuned checkpoint) would
+        # otherwise change it for every other command too.
+        sp = sub.add_parser(cmd.name, help=cmd.help, description=cmd.help, parents=[common_parser()])
         if cmd.add_arguments:
             cmd.add_arguments(sp)
     if not COMMANDS:
@@ -167,6 +172,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     cmd = COMMANDS[args.command]
+    if args.run_id is None and cmd.default_run_id:
+        args.run_id = cmd.default_run_id
     try:
         resolve_common(args)
         results.append_command(args.run_path, argv)
@@ -739,4 +746,523 @@ def _cmd_abtest(args: argparse.Namespace) -> int:
                                or item.get("reason", "")), flush=True)
         results.write_json(args.run_path, "abtest.json", {"session": session, "items": items})
     print(args.run_path / "abtest.json")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- Phase 2 data commands (specs/002)
+
+def _phase2_defaults(p: argparse.ArgumentParser) -> None:
+    """Phase 2 commands default to the pinned fine-tuned checkpoint at its reviewed revision."""
+    from .evalrun import CHECKPOINTS
+    p.set_defaults(model=CHECKPOINTS["fine_tuned"], revision="reviewed")
+
+
+def _data_root_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--data-root", default=None, help="data directory (default experiments/data)")
+
+
+def _data_import_args(p: argparse.ArgumentParser) -> None:
+    from . import data
+    _data_root_arg(p)
+    p.add_argument("--data-revision", default=data.DATASET_REVISION,
+                   help="dataset revision to import (default: the pinned sha)")
+    p.add_argument("--refresh", action="store_true", help="re-download the files and verify them again")
+
+
+@command("data-import", "Import the pinned upstream typed-decisions dataset; write experiments/data/manifest.json.",
+         _data_import_args, default_run_id="data")
+def _cmd_data_import(args: argparse.Namespace) -> int:
+    from . import data
+    from .results import Refusal
+    try:
+        man = data.import_dataset(revision=args.data_revision, root=args.data_root, refresh=args.refresh)
+    except (Refusal, data.DataError) as exc:
+        raise ToolError(str(exc))
+    root = data.data_root(args.data_root)
+    print("dataset %s @ %s" % (man["source"], man["revision"]))
+    for s in data.SPLITS:
+        sp = man["splits"][s]
+        print("  %s: %d cases, %d questions %s" % (s, sp["cases"], sp["questions"], sp["questions_by_type"]))
+    print("fingerprint %s" % man["fingerprint"]["combined"])
+    print("low-confidence cutoff %.4f (bottom quartile of train)" % man["low_confidence"]["cutoff"])
+    print(root / "manifest.json")
+    return EXIT_OK
+
+
+def _length_profile_args(p: argparse.ArgumentParser) -> None:
+    _data_root_arg(p)
+    _phase2_defaults(p)
+
+
+@command("length-profile", "Token-length profile of the upstream cases under Laya's tokenizer.",
+         _length_profile_args, default_run_id="data")
+def _cmd_length_profile(args: argparse.Namespace) -> int:
+    import json
+    from . import lengths
+    agent, _ = load_model(args)
+    try:
+        path = lengths.write_length_profile(agent, args.model, args.data_root)
+    except FileNotFoundError as exc:
+        raise ToolError(str(exc))
+    prof = json.loads(path.read_text(encoding="utf-8"))
+    t = prof["by_split"]["test"]
+    print("test rows: %s" % {k: t["overall"]["rows"][k] for k in ("min", "median", "p90", "p99", "max")})
+    print("share of test cases within each length: %s" % t["overall"]["cases"]["fit_share"])
+    print(path)
+    return EXIT_OK
+
+
+def _splits_args(p: argparse.ArgumentParser) -> None:
+    from . import data
+    _data_root_arg(p)
+    p.add_argument("--split-seed", type=int, default=data.DEFAULT_SPLIT_SEED, help="split seed (recorded)")
+    p.add_argument("--check", action="store_true", help="verify the existing split manifest without writing")
+
+
+@command("splits", "Create (or --check) the frozen dev/calibration/final split manifest.", _splits_args,
+         default_run_id="data")
+def _cmd_splits(args: argparse.Namespace) -> int:
+    from . import data
+    from .results import Refusal
+    try:
+        if args.check:
+            print(data.check_splits(args.data_root))
+            return EXIT_OK
+        sp = data.make_splits(seed=args.split_seed, root=args.data_root)
+    except (Refusal, FileNotFoundError) as exc:
+        raise ToolError(str(exc))
+    for s in data.EVAL_SPLITS:
+        e = sp["splits"][s]
+        print("%s: %d cases %s fingerprint %s" % (s, e["n_cases"], e["n_per_workflow"], e["fingerprint"][:16]))
+    print(data.data_root(args.data_root) / "splits.json")
+    return EXIT_OK
+
+
+def _solvability_args(p: argparse.ArgumentParser) -> None:
+    _data_root_arg(p)
+    _phase2_defaults(p)
+    p.add_argument("--models", default="fine_tuned,base", help="comma-separated checkpoint names (fine_tuned, base)")
+    p.add_argument("--split", default="dev", choices=["dev", "calibration"])
+    p.add_argument("--time-cap", type=float, default=None, help="seconds per checkpoint (resume with the same command)")
+
+
+@command("solvability", "Run both native checkpoints on original-length dev cases and pick the quality reference.",
+         _solvability_args)
+def _cmd_solvability(args: argparse.Namespace) -> int:
+    from . import evalrun
+    from .results import Refusal
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    bad = [m for m in models if m not in evalrun.CHECKPOINTS]
+    if bad:
+        raise ToolError("unknown checkpoint names %s; choose from %s" % (bad, list(evalrun.CHECKPOINTS)))
+    try:
+        rep = evalrun.run_solvability(args.run_path, models=models, split=args.split, threads=args.threads,
+                                      threads_source=args.threads_source, seed=args.seed,
+                                      data_root=args.data_root, time_cap=args.time_cap, revision=args.revision)
+    except (Refusal, FileNotFoundError) as exc:
+        raise ToolError(str(exc))
+    for name, r in rep["models"].items():
+        if r.get("status") == "failed":
+            print("%s: FAILED %s" % (name, r.get("reason")))
+            continue
+        acc = r["summary"]["accuracy"]["overall"]
+        print("%s: accuracy %.3f (majority %.3f, paired lo %.3f) solves=%s"
+              % (name, acc, r["majority_accuracy"], r["paired_vs_majority"]["lo"], r["solves"]))
+    print("reference checkpoint: %s" % rep["reference_checkpoint"])
+    print(args.run_path / "solvability.json")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- families and audit (T031)
+
+def _families_args(p: argparse.ArgumentParser) -> None:
+    from . import families
+    _data_root_arg(p)
+    _phase2_defaults(p)
+    p.add_argument("--split", required=True, choices=["dev", "calibration", "final"],
+                   help="split to build items for (final is built and fingerprinted, never scored)")
+    p.add_argument("--lengths", type=int_list, default=list(families.DEFAULT_LENGTHS))
+    p.add_argument("--variants", default=",".join(families.DEFAULT_VARIANTS),
+                   help="comma-separated: neutral@mid, distractor@mid, distractor@begin, distractor@end, oracle")
+    p.add_argument("--rule-version", default=families.RULE_VERSION)
+
+
+@command("families", "Build controlled long-context evaluation items for a split.", _families_args,
+         default_run_id="data")
+def _cmd_families(args: argparse.Namespace) -> int:
+    from . import families
+    agent, _ = load_model(args)
+    variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    bad = [v for v in variants if v not in families.DEFAULT_VARIANTS]
+    if bad:
+        raise ToolError("unknown variants %s; choose from %s" % (bad, list(families.DEFAULT_VARIANTS)))
+    try:
+        meta = families.build_split(agent, args.split, lengths=args.lengths, variants=variants, seed=args.seed,
+                                    rule_version=args.rule_version, root=args.data_root,
+                                    tokenizer_name=args.model,
+                                    progress=lambda n: print("  %d items" % n, flush=True))
+    except (FileNotFoundError, families.FamilyError) as exc:
+        raise ToolError(str(exc))
+    e = meta["splits"][args.split]
+    print("families %s, split %s: %d items from %d cases, fingerprint %s"
+          % (meta["families_id"], args.split, e["n_items"], e["n_cases"], e["fingerprint"][:16]))
+    print(families.items_dir(meta["families_id"], args.data_root) / ("%s.jsonl.gz" % args.split))
+    return EXIT_OK
+
+
+def _audit_sample_args(p: argparse.ArgumentParser) -> None:
+    from . import audit_items
+    _data_root_arg(p)
+    _phase2_defaults(p)
+    p.add_argument("--n", type=int, default=audit_items.DEFAULT_AUDIT_ITEMS, help="items to audit (at least 50)")
+    p.add_argument("--families-id", default=None, help="families to audit (default: the most recent)")
+
+
+@command("audit-sample", "Write the hand-audit sheet for the dev items of the current families.", _audit_sample_args,
+         default_run_id="data")
+def _cmd_audit_sample(args: argparse.Namespace) -> int:
+    from . import audit_items, data, families
+    agent, _ = load_model(args)
+    try:
+        fid = families.current_families_id(args.data_root, args.families_id)
+        items = list(families.read_items(families.items_dir(fid, args.data_root) / "dev.jsonl.gz"))
+        cases = {c["id"]: c for c in data.load_cases("test", args.data_root)}
+        sheet = audit_items.audit_sample(agent, items, cases, fid, n=args.n, seed=args.seed, root=args.data_root)
+    except (FileNotFoundError, ValueError) as exc:
+        raise ToolError(str(exc))
+    root = data.data_root(args.data_root)
+    print("audit sheet for families %s: %d items" % (fid, sheet["n"]))
+    print(root / "audit_sheet.md")
+    print("Review it, write audit_result_draft.json, then run: python -m experiments audit-record --from <draft>")
+    return EXIT_OK
+
+
+def _audit_record_args(p: argparse.ArgumentParser) -> None:
+    _data_root_arg(p)
+    p.add_argument("--from", dest="draft", required=True, help="the researcher's draft verdicts (JSON)")
+
+
+@command("audit-record", "Ingest the audit verdicts and compute the shares (audit_result.json).", _audit_record_args,
+         default_run_id="data")
+def _cmd_audit_record(args: argparse.Namespace) -> int:
+    from . import audit_items, data
+    try:
+        res = audit_items.record_audit(args.draft, root=args.data_root)
+    except (OSError, ValueError, KeyError) as exc:
+        raise ToolError(str(exc))
+    print("audited %d items: answer changed %.1f%%, ambiguous %.1f%%, evidence intact %s -> %s"
+          % (res["n_audited"], 100 * res["share_answer_changed"], 100 * res["share_ambiguous"],
+             res["all_evidence_intact"], "PASSED" if res["passed"] else "NOT PASSED (fix the rule and rebuild)"))
+    print(data.data_root(args.data_root) / "audit_result.json")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- evaluation commands (T047)
+
+def _condition_args(p: argparse.ArgumentParser) -> None:
+    from . import baselines, families, variants
+    _data_root_arg(p)
+    _phase2_defaults(p)
+    p.add_argument("--conditions", default=",".join(baselines.CONDITION_NAMES),
+                   help="comma-separated: %s" % ", ".join(baselines.CONDITION_NAMES))
+    p.add_argument("--variants", default="none",
+                   help="optimized-system variants of native, comma-separated: %s (default none = the architectural "
+                        "baselines)" % ", ".join(variants.VARIANTS))
+    p.add_argument("--lengths", type=int_list, default=None,
+                   help="default: 512,1024,2048,4096,8192 (variants: 512,2048,8192)")
+    p.add_argument("--families-id", default=None, help="families to use (default: the most recent)")
+
+
+def _plan_conditions(args: argparse.ArgumentParser, run_path, device: str = "cpu", sample: str = "all"):
+    """(conditions, restricted, case_ids) for the requested conditions, variants and lengths.
+
+    `restricted` means the fixed 20-case variant sample and `distractor@mid` items only: used for the optimized
+    variants and for the CPU parity subset (``--sample variant``)."""
+    from . import baselines, data, evalrun, families, variants
+    names = [c.strip() for c in args.conditions.split(",") if c.strip()]
+    bad = [c for c in names if c not in baselines.CONDITION_NAMES]
+    if bad:
+        raise ToolError("unknown conditions %s; choose from %s" % (bad, list(baselines.CONDITION_NAMES)))
+    vs = [v.strip() for v in args.variants.split(",") if v.strip()]
+    bad = [v for v in vs if v not in variants.VARIANTS]
+    if bad:
+        raise ToolError("unknown variants %s; choose from %s" % (bad, list(variants.VARIANTS)))
+    variant_run = vs != ["none"]
+    small = variant_run or sample == "variant"
+    lengths = args.lengths or (list(evalrun.VARIANT_LENGTHS) if small else list(families.DEFAULT_LENGTHS))
+    tuned = evalrun.load_tuned_params(run_path)
+    conds = []
+    if variant_run:
+        for v in vs:
+            conds += [evalrun.make_condition("native", L, variant=v, device=device, model=args.model) for L in lengths]
+        splits = data.read_data_json("splits.json", args.data_root)
+        return conds, True, list(splits["variant_sample"])
+    for name in names:
+        for L in lengths:
+            params = {"size": tuned["size"]} if name == "window" else None
+            conds.append(evalrun.make_condition(name, L, device=device, params=params, model=args.model))
+    if sample == "variant":
+        splits = data.read_data_json("splits.json", args.data_root)
+        return conds, True, list(splits["variant_sample"])
+    return conds, False, None
+
+
+def _eval_args(p: argparse.ArgumentParser) -> None:
+    _condition_args(p)
+    p.add_argument("--split", default="dev", choices=["dev", "calibration", "final"],
+                   help="split to score (final is refused: split_locked)")
+    p.add_argument("--tune", action="store_true",
+                   help="choose the window size on dev only, write conditions.json and stop")
+    p.add_argument("--time-cap", type=float, default=1800.0,
+                   help="seconds one measuring process may run before it is relaunched to continue (default 1800)")
+    p.add_argument("--max-cases", type=int, default=None, help="pilot: keep only the first N cases (recorded in the log)")
+    p.add_argument("--resume", action="store_true", default=True, help="continue from existing predictions (always on)")
+    p.add_argument("--device", default="cpu", choices=["cpu", "gpu"],
+                   help="device that scores quality (default cpu). gpu is fast (about an hour for the whole dev grid) and needs "
+                        ".venv-gpu; every result is labeled with its device (FR-024)")
+    p.add_argument("--sample", default="all", choices=["all", "variant"],
+                   help="variant = the fixed 20-case dev sample at 512, 2,048 and 8,192 tokens: the CPU parity subset, "
+                        "run with --device cpu next to the GPU results")
+
+
+@command("eval", "Quality run of the baseline conditions on a split (resumable, one subprocess per condition).", _eval_args)
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from . import audit_items, evalrun, families
+    from .results import Refusal, SplitLocked
+    if args.split == "final":
+        raise ToolError(str(SplitLocked("eval does not accept --split final: the final test split is not scored in this phase (FR-013)")))
+    try:
+        fid = families.current_families_id(args.data_root, args.families_id)
+        say = lambda m: print(m, flush=True)   # noqa: E731
+        if args.tune:
+            body = evalrun.tune_window(args.run_path, args.model, fid, revision=args.revision, threads=args.threads,
+                                       data_root=args.data_root, chunk_seconds=args.time_cap, log=say, device=args.device)
+            print("window tuned on dev (scored on %s): size %s; grid %s" % (args.device, body["window"]["size"], body["grid"]))
+            print(args.run_path / "conditions.json")
+            return EXIT_OK
+        conds, restricted, case_ids = _plan_conditions(args, args.run_path, device=args.device, sample=args.sample)
+        item_variants = ["distractor@mid"] if restricted else list(families.CONTEXT_VARIANTS)
+        out = evalrun.run_eval(args.run_path, args.split, conds, args.model, fid, item_variants,
+                               revision=args.revision, threads=args.threads, data_root=args.data_root,
+                               chunk_seconds=args.time_cap, case_ids=case_ids, max_cases=args.max_cases, log=say)
+    except (Refusal, FileNotFoundError, ValueError) as exc:
+        raise ToolError(str(exc))
+    bad = [o for o in out if o.get("status") not in ("measured",)]
+    print("%d conditions run, %d not complete: %s" % (len(out), len(bad), [(o.get("condition_id"), o.get("status")) for o in bad]))
+    return EXIT_OK
+
+
+def _calibrate_args(p: argparse.ArgumentParser) -> None:
+    pass
+
+
+@command("calibrate", "Fit per-question-type temperatures on the calibration-split results (calibration.json).",
+         _calibrate_args)
+def _cmd_calibrate(args: argparse.Namespace) -> int:
+    from . import summary
+    body = summary.calibrate(args.run_path)
+    for cid, by_type in body["conditions"].items():
+        print("%s: %s" % (cid, {t: round(v["temperature"], 3) for t, v in by_type.items()}))
+    if not body["conditions"]:
+        print("no calibration-split results yet; run: eval --split calibration")
+    print(args.run_path / "calibration.json")
+    return EXIT_OK
+
+
+def _latency_args(p: argparse.ArgumentParser) -> None:
+    _condition_args(p)
+    p.add_argument("--device", default="cpu", choices=["cpu", "gpu"], help="gpu needs the .venv-gpu environment")
+    p.add_argument("--repeats", default=None, help="auto (default) or passes over the fixed sample")
+    p.add_argument("--warmup", type=int, default=1)
+    p.add_argument("--time-cap", type=float, default=None, help="seconds per condition, model load included")
+
+
+@command("latency", "Latency of the conditions on the fixed dev sample: CPU (primary) or GPU (labeled).", _latency_args)
+def _cmd_latency(args: argparse.Namespace) -> int:
+    from . import families, latency
+    from .results import Refusal
+    try:
+        fid = families.current_families_id(args.data_root, args.families_id)
+        conds, _, _ = _plan_conditions(args, args.run_path, device=args.device)
+        out = latency.run_latency(args.run_path, conds, args.model, fid, revision=args.revision, threads=args.threads,
+                                  data_root=args.data_root, repeats=args.repeats, warmup=args.warmup,
+                                  time_cap=args.time_cap, log=lambda m: print(m, flush=True))
+    except (Refusal, FileNotFoundError, ValueError) as exc:
+        raise ToolError(str(exc))
+    print("%d latency conditions written under %s" % (len(out), latency.latency_dir(args.run_path, args.device)))
+    return EXIT_OK
+
+
+def _summary_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--n-boot", type=int, default=5000, help="bootstrap resamples (default 5000)")
+
+
+@command("eval-summary", "Summaries, paired comparisons and the cell table of the dev results (summary.json).",
+         _summary_args)
+def _cmd_eval_summary(args: argparse.Namespace) -> int:
+    from . import summary
+    body = summary.build_summary(args.run_path, split="dev", n_boot=args.n_boot, seed=args.seed)
+    for c in body["cells"]:
+        acc = "-" if c["accuracy"] is None else "%.3f" % c["accuracy"]
+        print("%-46s %-11s n=%d/%d acc=%s" % (c["condition_id"], c["status"], c["n_measured"], c["n_items"], acc))
+    print("selected retrieval budget on dev: %s" % body["retrieval_budget"]["selected"])
+    print(args.run_path / "summary.json")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------- plan, report, all (T057)
+
+def _freeze_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--available-cases", type=int, default=200, help="final-split cases available (default 200)")
+    p.add_argument("--new-version", action="store_true", help="create a new plan version (needs --reason)")
+    p.add_argument("--reason", default="", help="why a new plan version is needed")
+
+
+@command("freeze-plan", "Freeze the final-test protocol and sample size from the dev pilot (evaluation_plan.json).",
+         _freeze_args)
+def _cmd_freeze_plan(args: argparse.Namespace) -> int:
+    from . import evalplan
+    from .results import Refusal
+    try:
+        plan = evalplan.freeze_plan(args.run_path, available=args.available_cases, seed=args.seed,
+                                    new_version=args.new_version, reason=args.reason)
+    except (Refusal, ValueError) as exc:
+        raise ToolError(str(exc))
+    print("plan version %s frozen; fingerprint %s" % (plan["version"], plan["fingerprint"][:16]))
+    print(plan["statement"])
+    print("final-split items scored: %d" % plan["final_scored_items"])
+    print(args.run_path / "evaluation_plan.md")
+    return EXIT_OK
+
+
+def _report2_args(p: argparse.ArgumentParser) -> None:
+    _data_root_arg(p)
+
+
+@command("phase2-report", "Assemble report2.json and report2.md: curves, verdicts, Phase 3 evidence, limits.", _report2_args)
+def _cmd_phase2_report(args: argparse.Namespace) -> int:
+    from . import report2
+    try:
+        j, m = report2.write_report(args.run_path, args.data_root)
+    except report2.ReportError as exc:
+        raise ToolError(str(exc))
+    print(j)
+    print(m)
+    return EXIT_OK
+
+
+#: Rough seconds per native question row on the target CPU, from Phase 1 (fast path on, one document). Estimated.
+_ESTIMATE_SECONDS = {512: 2.0, 1024: 4.0, 2048: 9.0, 4096: 25.0, 8192: 80.0}
+
+
+def estimate_hours(cases: int = 120, questions: int = 5, variants: int = 4) -> Dict[str, float]:
+    """A rough wall-time estimate (labeled estimated in every use) of the architectural-baseline quality runs on dev."""
+    def rows(length: int) -> int:
+        n = cases // 2 if length >= 4096 else cases
+        return n * questions * variants
+    native = {L: rows(L) * s / 3600.0 for L, s in _ESTIMATE_SECONDS.items()}
+    # trunc512/truncCap ~ short rows, window ~ native, retrieve ~ a 1-2K row, oracle ~ one short row per case-question
+    total = 0.0
+    for L, h in native.items():
+        total += h                                        # native
+        total += rows(L) * _ESTIMATE_SECONDS[512] / 3600.0 * 2      # two truncations
+        total += h * (0.8 if L >= 2048 else 0.4)          # window
+        total += rows(L) * _ESTIMATE_SECONDS[2048] / 3600.0 * 0.6 * 3   # three retrieval budgets
+    total += cases * questions * 2.0 / 3600.0             # oracle, once per case-question
+    gpu = sum(rows(L) * s for L, s in _ESTIMATE_GPU_SECONDS.items()) / 3600.0 * (total / max(1e-9, sum(native.values())))
+    # CPU parity subset: the 20-case variant sample (100 questions) at 512, 2,048 and 8,192 tokens, distractor@mid only
+    parity = 100 * (sum(_ESTIMATE_SECONDS[L] for L in (512, 2048, 8192))              # native
+                    + 3 * 4.0 + 3 * 6.0) / 3600.0                                       # truncCap and retrieve1024
+    return {"native_hours": sum(native.values()), "all_baselines_hours": total,
+            "gpu_all_baselines_hours": gpu, "cpu_parity_hours": parity}
+
+
+#: Rough seconds per native question row on the RTX 4060 (estimated: Phase 1 measured 45 ms at 512 tokens).
+_ESTIMATE_GPU_SECONDS = {512: 0.05, 1024: 0.08, 2048: 0.15, 4096: 0.5, 8192: 1.5}
+
+
+def _gpu_python():
+    """The CUDA environment's interpreter (`.venv-gpu`), or None when it does not exist."""
+    from pathlib import Path
+    REPO_ROOT = Path(__file__).resolve().parent.parent
+    for rel in ("Scripts/python.exe", "bin/python"):
+        p = REPO_ROOT / ".venv-gpu" / rel
+        if p.exists():
+            return p
+    return None
+
+
+def _all2_args(p: argparse.ArgumentParser) -> None:
+    _data_root_arg(p)
+    _phase2_defaults(p)
+    p.add_argument("--dry-run", action="store_true", help="print the ordered plan and the estimated wall time, run nothing")
+
+
+@command("phase2-all", "Run the Phase 2 pipeline in order on dev and calibration; stops at the audit gate.", _all2_args)
+def _cmd_phase2_all(args: argparse.Namespace) -> int:
+    from . import audit_items, families
+    from .results import Refusal
+    rid = ["--run-id", args.run_id]
+    steps = [
+        ("data-import", []), ("splits", []), ("length-profile", []),
+        ("solvability", rid), ("families --split dev", []), ("families --split calibration", []),
+        ("families --split final", []), ("audit-sample", []),
+        ("AUDIT GATE", []),
+        # Quality is scored on the GPU (fast); GPU steps run in the .venv-gpu environment (FR-024, research.md R20).
+        ("eval --tune --device gpu", rid), ("eval --split dev --device gpu", rid),
+        ("eval --split calibration --device gpu", rid), ("calibrate", rid),
+        # The CPU parity subset: the same items on CPU, so GPU-scored quality can be called CPU-equivalent.
+        ("eval --split dev --device cpu --sample variant --conditions native,truncCap,retrieve1024", rid),
+        ("latency --device cpu", rid), ("eval --variants fastpath_off,int8_encoder,int8_all_nofast", rid),
+        ("latency --variants fastpath_off,int8_encoder,int8_all_nofast", rid), ("latency --device gpu", rid),
+        ("eval-summary", rid), ("freeze-plan", rid), ("phase2-report", rid),
+    ]
+    if args.dry_run:
+        est = estimate_hours()
+        print("Ordered plan for run %s:" % args.run_id)
+        for i, (s, extra) in enumerate(steps, 1):
+            print("  %2d. python -m experiments %s %s" % (i, s, " ".join(extra)) if s != "AUDIT GATE"
+                  else "  %2d. -- audit gate: review the sheet, then: python -m experiments audit-record --from <draft> --" % i)
+        print("Estimated wall time (estimated; correct it from the first measured runs): quality scored on the GPU "
+              "about %.1f hours for all architectural baselines on dev, plus the calibration split; the CPU parity subset "
+              "about %.1f hours; CPU latency and the variants on top. Scoring the same grid on CPU instead would take "
+              "about %.0f hours (native alone %.0f)." % (est["gpu_all_baselines_hours"], est["cpu_parity_hours"],
+                                                        est["all_baselines_hours"], est["native_hours"]))
+        print("Steps marked --device gpu need the .venv-gpu environment; phase2-all runs them there when it exists.")
+        return EXIT_OK
+    parser = build_parser()
+    common = ["--data-root", str(args.data_root)] if args.data_root else []
+    for s, extra in steps:
+        if s == "AUDIT GATE":
+            try:
+                audit_items.require_audit(families.current_families_id(args.data_root), args.data_root)
+            except (Refusal, FileNotFoundError) as exc:
+                print("stopped at the audit gate: %s" % exc)
+                print("Review experiments/data/audit_sheet.md, write your verdicts, run audit-record, then run phase2-all again.")
+                return EXIT_OK
+            continue
+        argv = s.split() + extra
+        if s.split()[0] not in ("calibrate", "eval-summary", "freeze-plan", "phase2-report"):
+            argv += common                                   # these four take no --data-root
+        if "--device gpu" in s:                              # GPU steps run in the CUDA environment
+            gpu_py = _gpu_python()
+            if gpu_py is None:
+                raise ToolError("step %r needs the .venv-gpu environment (experiments/setup_gpu.ps1)" % s)
+            print("== %s (in %s) ==" % (s, gpu_py), flush=True)
+            import subprocess
+            code = subprocess.call([str(gpu_py), "-m", "experiments"] + argv, cwd=str(_gpu_python().parent.parent.parent))
+            if code:
+                return code
+            continue
+        try:
+            ns = parser.parse_args(argv)
+        except SystemExit:
+            raise ToolError("internal: could not parse step %r" % s)
+        ns.threads_source = args.threads_source
+        ns.run_path = args.run_path
+        print("== %s ==" % s, flush=True)
+        resolve_common(ns)
+        code = COMMANDS[ns.command].run(ns)
+        if code:
+            return code
     return EXIT_OK

@@ -95,3 +95,28 @@ def test_hardware_values_are_real_or_unknown():
     assert hw["logical_cores"] == "unknown" or hw["logical_cores"] >= 1
     assert hw["ram_bytes"] == "unknown" or hw["ram_bytes"] > 0
     assert hw["hybrid_cores"] in (True, False, "unknown")
+
+
+# --------------------------------------------------------------------------- T008: Phase 2 blocks
+
+def test_phase2_blocks_are_added_when_data_is_given(loaded):
+    agent, info = loaded
+    data = {"dataset_revision": "abc", "fingerprints": {"combined": "f" * 64},
+            "split_fingerprints": {"dev": "1", "calibration": "2", "final": "3"}, "families_id": None}
+    m = M.build_manifest(agent, info, run_id="t", data=data, variant="int8_encoder")
+    assert m["phase"] == 2 and m["data"] == data and m["variant"] == "int8_encoder"
+    assert {"max_len", "head_max_len", "position_limit"} <= set(m["checkpoints"])
+    assert m["checkpoints"]["position_limit"] == 2048
+    assert "pyarrow" in m["software"]
+
+
+def test_phase1_manifest_has_no_data_block_and_is_marked_phase1(loaded):
+    agent, info = loaded
+    m = M.build_manifest(agent, info, run_id="t")
+    assert m["phase"] == 1 and "data" not in m and "variant" not in m
+
+
+def test_unknown_variant_is_refused(loaded):
+    agent, info = loaded
+    with pytest.raises(M.ManifestError):
+        M.build_manifest(agent, info, run_id="t", data={}, variant="fp16")

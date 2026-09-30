@@ -103,7 +103,7 @@ def test_assumptions_and_hypotheses_have_verdicts(run):
     assert set(a) == {"A1", "A2", "A3"}
     assert a["A1"]["verdict"] == "contradicted"          # 29% at 2048
     assert a["A2"]["verdict"] == "contradicted"
-    assert "most likely a GPU figure" in a["A2"]["evidence"]  # hardware caveat comes first
+    assert "Tesla T4 GPU" in a["A2"]["evidence"]  # hardware caveat comes first
     assert a["A2"]["evidence"].index("GPU figure") < a["A2"]["evidence"].index("target CPU")
     assert a["A3"]["verdict"] == "contradicted"          # dense_masked
     h = {x["id"]: x["verdict"] for x in body["hypotheses"]}

@@ -79,3 +79,6 @@ experiments/results/
 
 # CUDA environment for the GPU reference check (experiments/setup_gpu.ps1)
 .venv-gpu/
+
+# Phase 2 dataset cache, derived items and split files (regenerable; never commit raw upstream records)
+experiments/data/

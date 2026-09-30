@@ -14,8 +14,8 @@ each request. Model loading and one-time compilation are measured separately fro
 request latency. Fixed-schema question-token caching is allowed if disclosed consistently.
 
 The original ~33 ms at 512 tokens is a historical reference to reproduce on the target CPU,
-not an established result for this fork. Its hardware is not stated; Laya's own runtime message
-gives ~35 ms on GPU and ~200-500 ms on CPU, so it is most likely a GPU figure. Any comparison with
+not an established result for this fork. Upstream's model card reports it on a Tesla T4 GPU
+(32.8 ms multilingual, 39.5 ms English, one question), so it is a GPU figure. Any comparison with
 the measured CPU latency states this first and is not read as a CPU regression. Attention dominance near 2K and a decoder crossover
 near 4K are questions to measure. The original target of at most 2× the measured 512-token
 latency at 4K is a **stretch target**, not a hard pass/fail requirement.
@@ -125,6 +125,18 @@ quadratic attention dominates. Dataset construction in Phase 2 can proceed along
 ## Phase 2 — Build independent benchmarks and practical baselines
 
 _GPU: unnecessary for data work and CPU baseline inference. Budget wall time and RAM explicitly._
+
+_Scope as specified (2026-09-29, [`specs/002-decision-benchmark-baselines`](../specs/002-decision-benchmark-baselines/spec.md)):
+data comes from upstream's `typed-decisions` dataset (synthetic, short cases), and long inputs are built
+from its test cases under controlled families. The quality reference is the pinned `laya-typed-decisions`
+checkpoint. There is no training and no decoder baseline. GPU latency is reported beside CPU latency,
+and the realistic long-document tasks below remain a documented gap._
+
+_Status (2026-09-29): tooling built (`python -m experiments data-import`, `splits`, `length-profile`, `solvability`, `families`, `audit-sample`,
+`eval`, `calibrate`, `latency`, `eval-summary`, `freeze-plan`, `phase2-report`). Measured so far on the development split, CPU: the fine-tuned
+checkpoint scores 0.745 at original length against a 0.498 per-question majority reference and is the quality reference; the base English
+checkpoint scores 0.372 and does not solve the short cases. Original rows are 124 to 597 tokens (median 308). The baseline comparison waits
+on the hand audit of the constructed items and on many hours of CPU time (see the Phase 2 research notes, R11 and R19)._
 
 4. **Create realistic tasks and controlled length families**
    - Pilot datasets: at least 200 short, 100 medium, and 50 long documents, covering roughly

@@ -86,6 +86,7 @@ def software_info() -> Dict[str, Any]:
         "safetensors": _version("safetensors"),
         "huggingface_hub": _version("huggingface_hub"),
         "laya_sparse": _version("laya-sparse"),
+        "pyarrow": _version("pyarrow"),
     }
 
 
@@ -245,9 +246,25 @@ def config_sha256(agent) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+VARIANTS = ("none", "fastpath_off", "int8_encoder", "int8_all_nofast")
+
+
+def checkpoints_block(agent) -> Dict[str, Any]:
+    """The loaded checkpoint as Phase 2 needs it: id, pinned revision, caps and positional capacity."""
+    return {
+        "model": getattr(agent, "model_id", None),
+        "revision": getattr(agent, "revision", None),
+        "max_len": int(agent.cfg.get("max_len", 512)),
+        "head_max_len": int(agent.cfg.get("head_max_len", 192)),
+        "position_limit": int(agent.model.encoder.config.max_position_embeddings),
+    }
+
+
 def build_manifest(agent, load_info: Dict[str, Any], *, run_id: str, seed: int = 0,
                    threads_source: str = "default", requested_device: str = "cpu",
-                   repo_root: Path = REPO_ROOT) -> Dict[str, Any]:
+                   repo_root: Path = REPO_ROOT, data: Optional[Dict[str, Any]] = None,
+                   checkpoints: Optional[Dict[str, Any]] = None,
+                   variant: str = "none") -> Dict[str, Any]:
     """Assemble the manifest. Raises `ManifestError` if a Hub load has no resolved revision."""
     source = load_info.get("revision_source")
     revision = load_info.get("revision")
@@ -267,7 +284,9 @@ def build_manifest(agent, load_info: Dict[str, Any], *, run_id: str, seed: int =
         non_comparable.append("requested device %r is not cpu" % requested_device)
     if effective != "cpu":
         non_comparable.append("effective device %r is not cpu" % effective)
-    return {
+    if variant not in VARIANTS:
+        raise ManifestError("variant %r is not one of %s" % (variant, VARIANTS))
+    body = {
         "run_id": run_id,
         "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
         "non_comparable": bool(non_comparable),
@@ -303,3 +322,13 @@ def build_manifest(agent, load_info: Dict[str, Any], *, run_id: str, seed: int =
         "cache_policy": dict(CACHE_POLICY),
         "seeds": {"base_seed": seed, "rule": SEED_RULE},
     }
+    if data is not None:
+        # Phase 2 (specs/002): dataset revision and fingerprints, split and family fingerprints,
+        # the checkpoints in play, and which optimized-system variant this run measures.
+        body["phase"] = 2
+        body["data"] = data
+        body["checkpoints"] = checkpoints if checkpoints is not None else checkpoints_block(agent)
+        body["variant"] = variant
+    else:
+        body["phase"] = 1
+    return body

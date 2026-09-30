@@ -276,8 +276,10 @@ citation before it is relied on:
 - Upstream Laya: ~28.3k GitHub stars, ~2.5k forks, PyPI v0.3.21, three production checkpoints, and
   integrations with LangChain, LlamaIndex, CrewAI, MCP, ONNX, Docker, NixOS, Spark and a TypeScript package.
 - A proprietary competitor ("TypeSafe Jev") at $0.042 per 1M tokens, 236-276 ms latency, ECE 0.246.
-- **Laya at 32.8 ms on a T4 GPU, ECE 0.081.** If upstream documents this, it settles the hardware of the
-  ~33 ms reference (a T4 GPU) and the README, research plan and Phase 1 report should cite it.
+- **Laya at 32.8 ms on a T4 GPU, ECE 0.081.** Verified 2026-09-29 against upstream's
+  [model card](https://huggingface.co/convaiinnovations/laya): 32.8 ms (multilingual) and 39.5 ms (English) per
+  single question on a Tesla T4, ECE 0.081 post-temperature. This settles the ~33 ms reference as a T4 GPU figure;
+  the README, research plan and Phase 1 report now cite it.
 - Users passing `max_len=8192` with the multilingual checkpoint.
 
 The first draft's CPU latency figures (200-500 ms at 512, 1.5-8 s at 4K, "maybe OOM" at 8K) are

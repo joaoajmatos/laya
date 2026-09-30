@@ -211,3 +211,83 @@ def summarize(samples_ms: Iterable[float]) -> Dict[str, Any]:
         "n": n,
         "low_sample_p95": n < LOW_SAMPLE_P95,
     }
+
+
+# --------------------------------------------------------------------------- Phase 2 helpers (T007)
+#
+# Contract: specs/002-decision-benchmark-baselines/contracts/results.md. Predictions are
+# append-only JSON lines so an interrupted run resumes without rewriting finished items.
+
+#: Refusal reasons of contracts/cli.md ("Exit and refusal reasons").
+REFUSAL_REASONS = ("fingerprint_mismatch", "split_locked", "audit_required", "audit_stale",
+                   "reference_missing", "device_mismatch")
+
+
+class Refusal(ValueError):
+    """A Phase 2 command refuses to proceed; `reason` is one of `REFUSAL_REASONS`."""
+
+    def __init__(self, reason: str, message: str):
+        if reason not in REFUSAL_REASONS:
+            raise ValueError("unknown refusal reason %r" % reason)
+        super().__init__("%s: %s" % (reason, message))
+        self.reason = reason
+
+
+class SplitLocked(Refusal):
+    """A final-split item was about to be scored (FR-013, SC-008)."""
+
+    def __init__(self, message: str = "the final test split is not scored in this phase (FR-013)"):
+        super().__init__("split_locked", message)
+
+
+def append_jsonl(path: Union[str, Path], record: Dict[str, Any]) -> None:
+    """Append one JSON object as one line; earlier lines are never rewritten."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(_jsonable(record), ensure_ascii=False, allow_nan=False)
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(line + "\n")
+        f.flush()
+
+
+def read_jsonl(path: Union[str, Path]) -> List[Dict[str, Any]]:
+    """Read a JSON-lines file. A last line cut short by an interrupted write is skipped."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            if i >= len(lines) - 2:      # truncated tail from an interrupted append
+                continue
+            raise
+    return out
+
+
+def _param_text(params: Optional[Dict[str, Any]]) -> str:
+    if not params:
+        return ""
+    return "-".join("%s%s" % (k, params[k]) for k in sorted(params))
+
+
+def condition_id(name: str, params: Optional[Dict[str, Any]], variant: str, device: str, length: Any) -> str:
+    """Stable id ``<name>[.<params>].<variant>.<device>.L<length>``."""
+    parts = [name]
+    text = _param_text(params)
+    if text:
+        parts.append(text)
+    parts += [variant or "none", device, "L%s" % length]
+    return ".".join(parts)
+
+
+def assert_no_final(items: Iterable[Dict[str, Any]]) -> None:
+    """Raise `SplitLocked` when any item belongs to the final split."""
+    for it in items:
+        if it.get("split") == "final":
+            raise SplitLocked("item %r belongs to the final test split (FR-013)" % it.get("item_id"))

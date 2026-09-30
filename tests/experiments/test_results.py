@@ -107,3 +107,59 @@ def test_nan_is_written_as_null(tmp_path):
     d = R.run_dir("r7", root=tmp_path)
     R.write_json(d, "x.json", {"v": float("nan")})
     assert R.read_json(d, "x.json")["v"] is None
+
+
+# --------------------------------------------------------------------------- T006: Phase 2 helpers
+
+def test_append_jsonl_appends_one_line_per_call(tmp_path):
+    p = tmp_path / "q" / "predictions.jsonl"
+    R.append_jsonl(p, {"item_id": "a", "n": 1})
+    R.append_jsonl(p, {"item_id": "b", "n": 2})
+    assert p.read_text(encoding="utf-8").count("\n") == 2
+    assert [r["item_id"] for r in R.read_jsonl(p)] == ["a", "b"]
+    first = p.read_text(encoding="utf-8").splitlines()[0]
+    R.append_jsonl(p, {"item_id": "c"})
+    assert p.read_text(encoding="utf-8").splitlines()[0] == first      # earlier lines are never rewritten
+
+
+def test_read_jsonl_skips_a_truncated_last_line(tmp_path):
+    p = tmp_path / "p.jsonl"
+    p.write_text('{"a": 1}\n{"a": 2}\n{"a": ', encoding="utf-8")
+    assert R.read_jsonl(p) == [{"a": 1}, {"a": 2}]
+    assert R.read_jsonl(tmp_path / "missing.jsonl") == []
+
+
+def test_read_jsonl_still_rejects_corruption_in_the_middle(tmp_path):
+    p = tmp_path / "p.jsonl"
+    p.write_text('{"a": 1}\nnot json\n{"a": 2}\n{"a": 3}\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        R.read_jsonl(p)
+
+
+def test_condition_id_is_stable_and_distinguishes_parameters():
+    a = R.condition_id("window", {"size": 512, "stride": 256}, "none", "cpu", 2048)
+    assert a == R.condition_id("window", {"stride": 256, "size": 512}, "none", "cpu", 2048)
+    assert a == "window.size512-stride256.none.cpu.L2048"
+    assert a != R.condition_id("window", {"size": 256, "stride": 128}, "none", "cpu", 2048)
+    assert R.condition_id("native", None, "none", "cpu", 512) == "native.none.cpu.L512"
+    assert R.condition_id("native", {}, "int8_encoder", "cpu", "original") == "native.int8_encoder.cpu.Loriginal"
+
+
+def test_assert_no_final_raises_split_locked():
+    R.assert_no_final([{"item_id": "x", "split": "dev"}, {"item_id": "y", "split": "calibration"}])
+    with pytest.raises(R.SplitLocked) as err:
+        R.assert_no_final([{"item_id": "x", "split": "dev"}, {"item_id": "z", "split": "final"}])
+    assert err.value.reason == "split_locked" and "FR-013" in str(err.value)
+    assert isinstance(err.value, R.Refusal)
+
+
+def test_phase2_command_defaults_do_not_leak_into_phase1_commands():
+    """Regression (2026-09-29): set_defaults on a Phase 2 subparser changed --model for every command."""
+    from experiments import cli
+    cli._load_commands()
+    parser = cli.build_parser()
+    p1 = parser.parse_args(["audit"])
+    assert p1.model == cli.DEFAULT_MODEL and p1.revision is None
+    p2 = parser.parse_args(["length-profile"])
+    assert p2.model == "convaiinnovations/laya-typed-decisions" and p2.revision == "reviewed"
+    assert parser.parse_args(["sweep"]).model == cli.DEFAULT_MODEL
