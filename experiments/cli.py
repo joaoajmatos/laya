@@ -1232,6 +1232,13 @@ def _cmd_phase2_all(args: argparse.Namespace) -> int:
         return EXIT_OK
     parser = build_parser()
     common = ["--data-root", str(args.data_root)] if args.data_root else []
+    # Every step gets the pipeline's own settings, not the step's defaults (a seed or thread count given to
+    # phase2-all would otherwise be silently ignored, and the steps would disagree with each other).
+    shared = ["--seed", str(args.seed), "--model", args.model, "--mha-fastpath", args.mha_fastpath]
+    if args.revision:
+        shared += ["--revision", args.revision]
+    if args.threads_source == "user":
+        shared += ["--threads", str(args.threads)]
     for s, extra in steps:
         if s == "AUDIT GATE":
             try:
@@ -1241,7 +1248,7 @@ def _cmd_phase2_all(args: argparse.Namespace) -> int:
                 print("Review experiments/data/audit_sheet.md, write your verdicts, run audit-record, then run phase2-all again.")
                 return EXIT_OK
             continue
-        argv = s.split() + extra
+        argv = s.split() + extra + shared
         if s.split()[0] not in ("calibrate", "eval-summary", "freeze-plan", "phase2-report"):
             argv += common                                   # these four take no --data-root
         if "--device gpu" in s:                              # GPU steps run in the CUDA environment
