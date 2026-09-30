@@ -213,10 +213,17 @@ def build_summary(run_path: Path, split: str = "dev", expected: Optional[Sequenc
 
 
 def select_retrieval_budget(cells: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-    """The retrieval budget with the best dev accuracy over the lengths it was measured at (ties: the smaller)."""
+    """The retrieval budget with the best dev accuracy over the lengths it was measured at (ties: the smaller).
+
+    Only cells of the device that scored the headline quality count (GPU when any architectural cell was
+    GPU-scored, as in the report); the CPU parity subset covers one budget on a smaller sample and would
+    bias the comparison.
+    """
+    device = "gpu" if any(c["device"] == "gpu" and c["variant"] == "none" for c in cells) else "cpu"
     by_budget: Dict[int, List[float]] = {}
     for c in cells:
-        if c["name"].startswith("retrieve") and c["variant"] == "none" and c["accuracy"] is not None:
+        if (c["name"].startswith("retrieve") and c["variant"] == "none" and c["device"] == device
+                and c["accuracy"] is not None):
             by_budget.setdefault(int(c["name"][len("retrieve"):]), []).append(c["accuracy"])
     if not by_budget:
         return {"selected": None, "tuned_on": "dev", "mean_accuracy": {}}

@@ -131,6 +131,17 @@ def test_retrieval_budget_selection_uses_dev_accuracy(tmp_path):
     assert sel["mean_accuracy"]["512"] == pytest.approx(2 / 6)
 
 
+def test_retrieval_budget_selection_never_mixes_devices(tmp_path):
+    """The CPU parity subset (retrieve1024 only, on the 20-case sample) must not lift one budget's mean."""
+    for budget, n_right in (("retrieve512", 4), ("retrieve1024", 3)):
+        write(tmp_path, "%s.none.gpu.L2048" % budget, [rec("i%d" % i, "c%d" % i, "dev", i < n_right) for i in range(6)])
+    write(tmp_path, "retrieve1024.none.cpu.L2048", [rec("i%d" % i, "c%d" % i, "dev", True) for i in range(6)])
+    write(tmp_path, "native.none.gpu.L2048", [rec("i%d" % i, "c%d" % i, "dev", True) for i in range(6)])
+    sel = S.build_summary(tmp_path, n_boot=50)["retrieval_budget"]
+    assert sel["selected"] == 512                    # GPU-scored: 4/6 against 3/6
+    assert sel["mean_accuracy"]["1024"] == pytest.approx(3 / 6)
+
+
 # --------------------------------------------------------------------------- CPU/GPU parity (FR-024, 2026-09-30)
 
 def _pair(tmp_path, n=100, flips=0, acc_shift=0):
