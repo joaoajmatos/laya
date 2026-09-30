@@ -289,6 +289,23 @@ def test_a_time_cap_is_relaunched_until_done(fam, tmp_path):
     assert len({r["item_id"] for r in recs}) == len(recs) == 60
 
 
+def test_a_capped_run_is_not_reported_complete_because_another_split_shares_the_predictions_file(fam, tmp_path):
+    """Dev and calibration results of one condition share a predictions file; progress counts this split's items."""
+    kw = dict(model=fam["model"], families_id=fam["fid"], variants=["distractor@mid"], revision=None,
+              data_root=fam["root"], require_audit=False)
+    E.run_eval(tmp_path, "dev", [cnd("native", 256)], runner_fn=in_process, **kw)
+    launches = []
+
+    def capped(function, spec, time_cap=None):
+        launches.append(1)
+        return in_process(function, dict(spec, time_cap=1e-9 if len(launches) == 1 else None))
+
+    out = E.run_eval(tmp_path, "calibration", [cnd("native", 256)], runner_fn=capped, **kw)
+    recs = read_jsonl(tmp_path / "quality" / "native.none.cpu.L256" / "predictions.jsonl")
+    assert out[0]["status"] == "measured" and len(launches) >= 2
+    assert len([r for r in recs if r["split"] == "calibration"]) == 40
+
+
 def test_a_dead_child_leaves_its_items_failed_with_the_cause_and_the_run_continues(fam, tmp_path):
     def dies(function, spec, time_cap=None):
         return {"status": "failed", "cause": "oom", "reason": "MemoryError: out of memory", "exit_code": 3221225495}

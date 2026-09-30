@@ -373,7 +373,8 @@ def eval_condition(spec: Dict[str, Any]) -> Dict[str, Any]:
     items = select_items(_iter_split_items(spec["families_id"], spec["split"], root), spec["split"], splits,
                          cond["length"], spec["variants"], spec.get("case_ids"), spec.get("max_cases"))
     out = Path(spec["out_dir"]) / spec.get("subdir", "quality") / cond["condition_id"] / "predictions.jsonl"
-    done_before = len({r["item_id"] for r in read_jsonl(out)})
+    # The file also holds this condition's results on the other splits; only this run's items count.
+    done_before = len({it["item_id"] for it in items} & {r["item_id"] for r in read_jsonl(out)})
     started = time.perf_counter()
     if cond.get("device", "cpu") == "gpu":
         from .latency import _load_gpu_agent
