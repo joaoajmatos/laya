@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main, phase2-tooling]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # The CPU wheel is far smaller than the default CUDA build and is all the tests need. Installing it
+      # first satisfies the torch requirement of the package, so pip does not pull the CUDA build.
+      - name: Install CPU-only torch
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Install the package and test dependencies
+        run: pip install -e ".[experiments]"
+      - name: Offline tests
+        run: python -m pytest -m "not slow" -q
