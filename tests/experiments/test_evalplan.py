@@ -82,6 +82,22 @@ def test_freeze_records_metrics_margin_comparisons_pilot_and_fingerprint(tmp_pat
     assert plan["resolvable"] is False and "cannot resolve" in plan["statement"]
 
 
+def test_the_pilot_reads_the_device_that_scored_the_quality_not_the_small_cpu_parity_subset(tmp_path):
+    """Quality is scored on the GPU by default; the CPU cells are only a 20-case parity subset."""
+    rows = {}
+    for dev, n_cases in (("gpu", 60), ("cpu", 3)):
+        rows[dev] = ([], [])
+        for c in range(n_cases):
+            for q in range(5):
+                rows[dev][0].append(rec("c%d|q%d" % (c, q), "c%d" % c, "dev", True))
+                rows[dev][1].append(rec("c%d|q%d" % (c, q), "c%d" % c, "dev", c % 5 != 0))
+        write(tmp_path, "native.none.%s.L2048" % dev, rows[dev][0])
+        write(tmp_path, "trunc512.none.%s.L2048" % dev, rows[dev][1])
+    comps = P.pilot(tmp_path, available=200)["comparisons"]
+    assert [(c["condition_id"], c["reference"], c["n_cases"]) for c in comps] == \
+        [("trunc512.none.gpu.L2048", "native.none.gpu.L2048", 60)]
+
+
 def test_a_frozen_plan_is_not_overwritten_without_a_new_version_and_a_reason(tmp_path):
     run = pilot_run(tmp_path)
     first = P.freeze_plan(run)

@@ -120,11 +120,14 @@ def pilot(run_path: Path, available: int, seed: int = 0) -> Dict[str, Any]:
     recs = {cid: [r for r in read_jsonl(summary.quality_dir(run_path) / cid / "predictions.jsonl") if r.get("split") == "dev"]
             for cid in summary.condition_ids(run_path)}
     out: List[Dict[str, Any]] = []
+    # The device that scored the headline quality (as in the report); the CPU cells of a GPU-scored run are only a parity subset.
+    infos = {cid: summary.parse_condition_id(cid) for cid in recs}
+    qdev = "gpu" if any(i["device"] == "gpu" and i["variant"] == "none" for i in infos.values()) else "cpu"
     for cid, rows in recs.items():
-        info = summary.parse_condition_id(cid)
-        if info["name"] not in BASELINES or info["variant"] != "none" or info["device"] != "cpu":
+        info = infos[cid]
+        if info["name"] not in BASELINES or info["variant"] != "none" or info["device"] != qdev:
             continue
-        ref_cid = "native.none.cpu.L%s" % info["length"]
+        ref_cid = "native.none.%s.L%s" % (qdev, info["length"])
         if ref_cid not in recs:
             continue
         d = case_differences(rows, recs[ref_cid])
