@@ -77,6 +77,8 @@ def make_record(item: Dict[str, Any], condition: Dict[str, Any], **fields: Any) 
            "question_type": item["question_type"], "variant": item["variant"], "length": item["length"],
            "low_confidence": g.get("low_confidence"), "argmax_agree": g.get("argmax_agree"),
            "tv_top_quartile": g.get("tv_top_quartile"), "device": condition.get("device", "cpu")}
+    if condition.get("families_id"):
+        rec["families_id"] = condition["families_id"]
     rec.update(fields)
     return rec
 
@@ -438,6 +440,12 @@ def run_eval(run_path: Path, split: str, conditions: Sequence[Dict[str, Any]], m
     outcomes: List[Dict[str, Any]] = []
     for cond in conditions:
         out = Path(run_path) / subdir / cond["condition_id"] / "predictions.jsonl"
+        # Item ids do not change when the families are rebuilt, so resuming would reuse results scored on other items.
+        other = {r.get("families_id") for r in read_jsonl(out)} - {None, families_id}
+        if other:
+            raise Refusal("fingerprint_mismatch", "%s holds results scored on families %s, not the current %s; use "
+                                                  "another --run-id for rebuilt families" % (out, sorted(other), families_id))
+        cond = dict(cond, families_id=families_id)              # stamped into every record of this run
         spec = {"condition": cond, "split": split, "families_id": families_id, "variants": list(variants),
                 "model": model, "revision": revision, "threads": threads, "out_dir": str(run_path),
                 "data_root": str(data_root) if data_root else None, "case_ids": list(case_ids) if case_ids else None,

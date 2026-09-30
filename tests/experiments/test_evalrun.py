@@ -306,6 +306,22 @@ def test_a_capped_run_is_not_reported_complete_because_another_split_shares_the_
     assert len([r for r in recs if r["split"] == "calibration"]) == 40
 
 
+def test_predictions_of_other_families_are_never_resumed_as_current(fam, tmp_path, tiny_agent):
+    """Item ids do not change when the families are rebuilt (seed, rule), so stale results must be refused."""
+    kw = dict(model=fam["model"], variants=["distractor@mid"], revision=None, data_root=fam["root"],
+              runner_fn=in_process, require_audit=False)
+    E.run_eval(tmp_path, "dev", [cnd("native", 256)], families_id=fam["fid"], max_cases=2, **kw)
+    recs = read_jsonl(tmp_path / "quality" / "native.none.cpu.L256" / "predictions.jsonl")
+    assert recs and {r["families_id"] for r in recs} == {fam["fid"]}
+    other = F.build_split(tiny_agent, "dev", lengths=FAM_LENGTHS, variants=FAM_VARIANTS, seed=1, root=fam["root"],
+                          tokenizer_name="tiny")["families_id"]
+    assert other != fam["fid"]
+    with pytest.raises(Refusal) as err:
+        E.run_eval(tmp_path, "dev", [cnd("native", 256)], families_id=other, max_cases=2, **kw)
+    assert err.value.reason == "fingerprint_mismatch"
+    assert len(read_jsonl(tmp_path / "quality" / "native.none.cpu.L256" / "predictions.jsonl")) == len(recs)
+
+
 def test_a_dead_child_leaves_its_items_failed_with_the_cause_and_the_run_continues(fam, tmp_path):
     def dies(function, spec, time_cap=None):
         return {"status": "failed", "cause": "oom", "reason": "MemoryError: out of memory", "exit_code": 3221225495}
