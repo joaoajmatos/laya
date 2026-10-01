@@ -2,7 +2,7 @@
 
 Research fork of [Laya](https://huggingface.co/convaiinnovations/laya) that explores sparse attention for running encoder-only decision models on **4K–8K token contexts on CPU**.
 
-> **Status:** early research. Phase 1 (CPU path audit) is complete. Phase 2 (decision-quality benchmarks) has its tooling built and the first data measurements done; the baseline comparison awaits the hand audit and long CPU runs. Sparse attention variants are not implemented yet.
+> **Status:** early research. Phase 1 (CPU path audit) is complete. Phase 2 (decision-quality benchmarks) is run on the development and calibration splits (synthetic data; GPU-scored quality is unverified against CPU, and the audit was by an AI assistant); see `docs/research-plan.md` for the findings. Sparse attention variants are not implemented yet.
 
 ## Why
 
@@ -75,7 +75,6 @@ Tests marked `slow` need the real checkpoint and network access.
 - [Research plan](docs/research-plan.md): objectives, workload definition and roadmap
 - [Phase 1 spec](specs/001-cpu-path-audit/spec.md): the CPU path audit
 - [Phase 2 spec](specs/002-decision-benchmark-baselines/spec.md): decision benchmarks against truncation, windowing and retrieval baselines
-- [Raya feasibility](docs/raya-feasibility.md): draft study of a Rust CPU-native runtime
 - [Sparse attention report](docs/sparse-attention-report.md): draft; claims are hypotheses until measured
 
 ## Contributing

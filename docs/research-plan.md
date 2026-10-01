@@ -132,11 +132,7 @@ from its test cases under controlled families. The quality reference is the pinn
 checkpoint. There is no training and no decoder baseline. GPU latency is reported beside CPU latency,
 and the realistic long-document tasks below remain a documented gap._
 
-_Status (2026-09-29): tooling built (`python -m experiments data-import`, `splits`, `length-profile`, `solvability`, `families`, `audit-sample`,
-`eval`, `calibrate`, `latency`, `eval-summary`, `freeze-plan`, `phase2-report`). Measured so far on the development split, CPU: the fine-tuned
-checkpoint scores 0.745 at original length against a 0.498 per-question majority reference and is the quality reference; the base English
-checkpoint scores 0.372 and does not solve the short cases. Original rows are 124 to 597 tokens (median 308). The baseline comparison waits
-on the hand audit of the constructed items and on many hours of CPU time (see the Phase 2 research notes, R11 and R19)._
+_Status (2026-10-01): the Phase 2 runs are complete on the development and calibration splits; no final-split item has been scored. Quality was scored on the GPU. The CPU parity check on a 20-case subset failed its strict criteria (same predicted answer on 98.0% to 100% of items, accuracy differences of up to 2.0 points on 95 to 100 items, where one item is one point), so GPU-scored quality is labeled unverified. On the development split native accuracy falls from 60.1% at 512 tokens to 44.5% at 8,192, against 74.0% to 74.7% for the oracle control; truncation, windowing (the best, 56.2% at 1,024 and 50.1% at 8,192) and retrieval do not recover it. Native CPU p50 latency is 1.9 s at 512 tokens and 83.9 s at 8,192, against 4.1 s for truncation to the cap and 4.6 s for retrieval at 8,192. The int8 variants lose 10 to 16 points of accuracy on a 10-case sample. The hand audit was done by an AI assistant at the researcher's request. The data is synthetic, so every conclusion holds for the constructed families only; ContractNLI is the planned realistic follow-up. Details: `report2.md` of run `p2-dev` and the Phase 2 research notes, R11, R19 and R20._
 
 4. **Create realistic tasks and controlled length families**
    - Pilot datasets: at least 200 short, 100 medium, and 50 long documents, covering roughly

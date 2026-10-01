@@ -540,3 +540,20 @@ def test_solvability_runs_the_named_checkpoints_and_rejects_unknown_ones(built, 
     body = json.loads((env.run_dir("solv") / "solvability.json").read_text(encoding="utf-8"))
     assert "fine_tuned" in body["models"] and body["split"] == "dev"
     assert "reference checkpoint:" in r.out and "fine_tuned: accuracy" in r.out
+
+
+def test_variant_subset_is_spread_over_workflows_and_leaves_the_full_sample_alone():
+    ids = ["%s_%06d" % (w, i) for w in ("a_wf", "b_wf", "c_wf", "d_wf") for i in range(5)]
+    assert cli._variant_subset(ids, None) == sorted(ids) and cli._variant_subset(ids, 20) == sorted(ids)
+    ten = cli._variant_subset(ids, 10)
+    assert len(ten) == 10 and {c.rsplit("_", 1)[0] for c in ten} == {"a_wf", "b_wf", "c_wf", "d_wf"}
+    assert set(ten) <= set(ids) and ten == cli._variant_subset(ids[::-1], 10)            # a subset, and order independent
+    with pytest.raises(cli.ToolError):
+        cli._variant_subset(ids, 3)
+
+
+@pytest.mark.parametrize("command", ["calibrate", "eval-summary", "freeze-plan", "phase2-report"])
+def test_the_analysis_commands_default_to_the_phase_2_checkpoint(command):
+    # Without this, a run recorded with the fine-tuned checkpoint was refused by these commands (found on the real run).
+    args = cli.build_parser().parse_args([command, "--run-id", "x"])
+    assert args.model == evalrun.CHECKPOINTS["fine_tuned"] and args.revision == "reviewed"

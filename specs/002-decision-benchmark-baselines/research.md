@@ -357,3 +357,42 @@ the GPU never substitutes for them.
 
 **Compute estimate (estimated, to be corrected)**: GPU quality about 2.5 hours for the architectural baselines on dev plus the
 calibration split; CPU parity subset about 3.4 hours (native at 8,192 tokens is most of it); CPU latency and variants on top.
+
+
+## R21. Results of the p2-dev run (2026-10-01)
+
+All numbers are on the development split (120 cases; 60 at 4,096 and 8,192 tokens) unless stated, from `summary.json` and `report2.md` of run `p2-dev`.
+No final-split item was scored.
+
+**Parity: failed.** Nine comparisons (native, truncCap, retrieve1024 at 512, 2,048 and 8,192 tokens, 20 cases). The share of identical
+predicted answers was 98.0% to 100% in every row, and the largest probability difference was 0.0078. Five rows missed the accuracy criterion (0.5
+points): native at 512 (-1.1) and 8,192 (-2.0), retrieve1024 at 512 (-1.1) and 8,192 (-1.0), and truncCap at 512 (-1.1). With 95 to 100 items one
+item is 1 point, so the 0.5-point criterion cannot be met by any single flipped item; the criterion is finer than the sample. The rule was written
+before the run and was not changed. GPU-scored quality therefore stays labeled unverified, as R20 says. A future spec could choose a larger parity
+sample or a criterion that fits it.
+
+**Quality (GPU-scored, unverified against CPU).** Native accuracy: 60.1% at 512 tokens, 51.3% at 1,024, 49.0% at 2,048, 46.8% at 4,096, 44.5% at
+8,192. The oracle control (the record under review with its question, framed like the items) scores 74.0% to 74.7% at every length, and the fine-tuned
+checkpoint scores 74.5% on the original rows. Truncation to the checkpoint cap: 51.3% / 48.5% / 46.3% / 46.9% at 1,024 to 8,192. Window (size 256, tuned on dev):
+56.2% / 52.8% / 52.0% / 50.1%. Retrieval (1,024-token budget, chosen on dev): 51.3% / 48.9% / 49.0% / 49.5%. No baseline recovers the oracle level.
+Native beats truncation to 512 tokens by 3.0 points at 2,048 tokens (95% [+1.1, +5.0], 120 cases); every other native-versus-truncation comparison
+at 2,048 to 8,192 tokens is inconclusive. The gap to the oracle suggests the loss comes from the surrounding text, not from the cost of attention, and
+the 2026-09-30 smoke observation (one case) pointed the same way; this phase did not test the reason.
+
+**Cost (CPU, 12-item sample, p50).** Native: 1.9 s at 512, 4.1 s at 1,024, 9.7 s at 2,048, 27.2 s at 4,096, 83.9 s at 8,192. Truncation to the cap about 4.1 s
+at 1,024 and above; retrieval with a 1,024 budget 4.1 to 4.6 s; window 7.3 s at 1,024 to 69.2 s at 8,192. GPU latency (separate table): native 46 ms at 512 to 865 ms at 8,192.
+
+**Variants (CPU, 10 cases, 50 items per length).** fastpath_off changes no prediction and is 3% faster at 512, 16% at 2,048 and 29% at 8,192. int8_encoder and
+int8_all_nofast change 28% to 36% of the predicted answers and lose 10 to 16 points of accuracy against native; their latency gain is 14% to 32% at 512 and 2,048, and
+8% to 37% at 8,192. Quantization is not acceptable without retraining.
+
+**Calibration.** Two window cells (`noul` at 4,096 and 8,192 tokens) hit the temperature ceiling of 4.0, so their scaled calibration error is a bound, not a fit.
+
+**Plan.** The frozen plan (version 1) says the 200-case final split cannot resolve a 2-point margin for 20 of 30 pilot comparisons at 80% power; the most demanding needs about
+1,510 cases. Those comparisons will be inconclusive unless cases are added.
+
+**Partial 512 cells.** 24 of the 2,400 items at 512 tokens are unsupported, because the target row alone needs more than 512 tokens (six customer-service cases,
+four variants each; the length profile shows 93% of customer-service cases fit). This is the reason recorded per item.
+
+**Caveats that apply to all of the above.** The data is synthetic and short; the distractor records come from the training split the checkpoint was trained on; the audit was by an
+AI assistant, not a human; the variants run used 10 cases (spec, 2026-09-30); and the upstream test split is public.

@@ -133,9 +133,9 @@ description: "Task list for Decision Benchmark and Practical Baselines (Research
 - [X] T046 [US3] Implement GPU latency in `experiments/latency.py`: the same sample on CUDA from the `.venv-gpu` environment (`experiments/gpu.py` helpers), Laya's native CUDA precision defaults, `peak_gpu_bytes`, written to `gpu_latency/<condition_id>.json`; `int8_*` and `fastpath_off` variants recorded `unsupported` with the reason; never substitutes for a CPU result and no CPU cost figure reads these files (FR-024). Depends on T045
 - [X] T047 [US3] Register `eval`, `calibrate`, `latency` and `eval-summary` in `experiments/cli.py` per contracts/cli.md (`--conditions`, `--variants`, `--lengths`, `--split`, `--tune`, `--time-cap`, `--resume`, `--device cpu|gpu`, `--repeats`, `--warmup`, canary options). Depends on T043, T044, T045, T046
 - [X] T048 [P] [US3] Add `slow` tests to `tests/experiments/test_real_checkpoint.py`: on the real fine-tuned checkpoint, `native` runs an 8,192-token item within positional capacity and labeled `beyond_configured_max_len`; `fastpath_off` predictions agree with native within 1e-4; both int8 variants run, and their probability shift from native is recorded (the spike saw about 0.02) and is reported, not asserted small
-- [ ] T049 [US3] **RUN**: tune on dev, then quality runs, in this order, with `--run-id p2-dev`: `eval --split dev --tune`; `eval --split dev` (all conditions, tier rule); `eval --split calibration`; `calibrate`. Expect this to take many hours (estimated, research.md R11); it resumes after interruption. Depends on T034, T047, T048
-- [ ] T050 [US3] **RUN**: `latency --device cpu` for all conditions and lengths, then the variant runs `eval --split dev --variants fastpath_off,int8_encoder,int8_all_nofast`, then `latency --variants ...`. Do not run other heavy work during latency runs (drift, Phase 1 R14). Depends on T049
-- [ ] T051 [US3] **RUN**: from the GPU environment, `.venv-gpu\Scripts\python.exe -m experiments latency --device gpu --run-id p2-dev`, then `eval-summary`. Confirm every (condition, length) cell is measured, unsupported, failed or partial with a reason (SC-005, SC-006). Depends on T050
+- [X] T049 [US3] **RUN**: tune on dev, then quality runs, in this order, with `--run-id p2-dev`: `eval --split dev --tune`; `eval --split dev` (all conditions, tier rule); `eval --split calibration`; `calibrate`. Expect this to take many hours (estimated, research.md R11); it resumes after interruption. Depends on T034, T047, T048
+- [X] T050 [US3] **RUN**: `latency --device cpu` for all conditions and lengths, then the variant runs `eval --split dev --variants fastpath_off,int8_encoder,int8_all_nofast --variant-cases 10`, then `latency --variants ...`. Do not run other heavy work during latency runs (drift, Phase 1 R14). Depends on T049
+- [X] T051 [US3] **RUN**: from the GPU environment, `.venv-gpu\Scripts\python.exe -m experiments latency --device gpu --run-id p2-dev`, then `eval-summary`. Confirm every (condition, length) cell is measured, unsupported, failed or partial with a reason (SC-005, SC-006). Depends on T050
 
 **Checkpoint**: User Stories 1 to 3 work. Every baseline has a result at every length on the dev split, either measured or marked with a reason, with CPU and GPU latency reported apart.
 
@@ -158,7 +158,7 @@ description: "Task list for Decision Benchmark and Practical Baselines (Research
 - [X] T055 [US4] Implement report sections in `experiments/report2.py`: data manifest and length profile (share of cases within 512, 1,024, 2,048, 4,096, 8,192 per workflow), solvability and the reference decision, the hand-audit result, low-confidence and agreement strata, and the over-head-budget cases (questions whose options exceed `head_max_len`) reported separately. Depends on T044, T053
 - [X] T056 [US4] Implement report curves and verdicts in `experiments/report2.py`: accuracy and calibration against CPU latency, and against GPU latency, per baseline and length with paired case-clustered intervals; the native-versus-`trunc512`/`truncCap` verdict at 2K, 4K and 8K (`better`, `equal`, `worse`, `inconclusive`); whether any baseline reaches native matching-length accuracy within -2 percentage points at lower CPU cost (FR-028); optimized-variant table; the Phase 3 evidence table (sparse attention, selection, compression, none: supported, weakened or open, each row linked to a result); labels, limits and reproduce commands. Windowed probabilities are marked non-comparable. Depends on T055
 - [X] T057 [US4] Register `freeze-plan`, `phase2-report` and `phase2-all` in `experiments/cli.py` per contracts/cli.md; `phase2-all --dry-run` prints the ordered plan and the estimated wall time (labeled estimated) and the real run stops at the audit gate and at any failure. Depends on T054, T056
-- [ ] T058 [US4] **RUN**: `python -m experiments freeze-plan --run-id p2-dev`, then `phase2-report --run-id p2-dev`. Read `report2.md` against the raw results, confirm `final_scored_items: 0` and that a SC-009 decision on Phase 3 directions can be made from the report alone. Depends on T051, T057
+- [X] T058 [US4] **RUN**: `python -m experiments freeze-plan --run-id p2-dev`, then `phase2-report --run-id p2-dev`. Read `report2.md` against the raw results, confirm `final_scored_items: 0` and that a SC-009 decision on Phase 3 directions can be made from the report alone. Depends on T051, T057
 
 **Checkpoint**: All four user stories work. The report and the frozen plan exist.
 
@@ -170,7 +170,7 @@ description: "Task list for Decision Benchmark and Practical Baselines (Research
 - [X] T060 [P] Record in `specs/002-decision-benchmark-baselines/research.md` any assumption a run contradicted (row lengths, quantization behavior, timing estimates, half-sample sizes), following the R16 practice of Phase 1
 - [X] T061 Run the full offline suite `python -m pytest tests/experiments -m "not slow"` and the `slow` suite on the measuring machine; fix failures, and report any check that could not be run
 - [X] T062 Run `git diff --stat -- laya/` and confirm it is empty (plan; constitution I, IV); confirm `git status` shows nothing under `experiments/data/` or `experiments/results/` (FR-003, FR-031)
-- [ ] T063 Run `quickstart.md` end to end and tick its success-check table (SC-001 to SC-009), including SC-001: delete `experiments/data/` and reproduce the manifest, length profile, splits and items with matching fingerprints
+- [X] T063 Run `quickstart.md` end to end and tick its success-check table (SC-001 to SC-009), including SC-001: delete `experiments/data/` and reproduce the manifest, length profile, splits and items with matching fingerprints
 
 ---
 
@@ -259,8 +259,19 @@ runs use `--device gpu`, and T067 adds the CPU parity subset.
 - [X] T067 Make the report device-aware: headline quality from the scoring device, CPU cost joined through each cell's CPU twin, a parity section that states passed, failed or unverified (`experiments/report2.py`); add `eval --device`, `eval --sample variant` and the GPU steps of `phase2-all` (`experiments/cli.py`)
 - [X] T068 Tests: device labels and refusals in `tests/experiments/test_evalrun.py`, parity in `tests/experiments/test_calibration_summary.py`, GPU-scored reports in `tests/experiments/test_report2.py`
 - [X] T069 Smoke-check on the real checkpoint (scratch run `p2-smoke`, one dev case, 12 conditions at 2,048 and 8,192 tokens): GPU scoring completes in 158 s, and CPU and GPU predictions agree on all 60 compared items (largest probability difference 0.0045)
-- [ ] T070 **RUN**: after the audit (T034), score quality on the GPU (`eval --device gpu`: tune, dev, calibration), then the CPU parity subset (`eval --device cpu --sample variant --conditions native,truncCap,retrieve1024`), then `eval-summary` and read the `parity` block. If it fails, GPU-scored quality stays labeled unverified in the report
+- [X] T070 **RUN**: after the audit (T034), score quality on the GPU (`eval --device gpu`: tune, dev, calibration), then the CPU parity subset (`eval --device cpu --sample variant --conditions native,truncCap,retrieve1024`), then `eval-summary` and read the `parity` block. If it fails, GPU-scored quality stays labeled unverified in the report
 
 - **T034 (2026-09-30):** the audit was performed by an AI assistant at the researcher's explicit request, not by a human, and recorded as such
   (`auditor` and `method` in `experiments/data/audit_result.json`; the report says so and recommends a human repeat it). Result: 60 items, 0% answer
   changes, 0% ambiguous, evidence intact; passed for families `1d99f7eeadeff18e`. The remaining items were checked, not read one by one.
+
+## Status notes (2026-10-01)
+
+- **Run complete (T049 to T051, T058, T070):** the GPU quality grid (tune, dev, calibration; 40 conditions), the CPU parity subset (512, 2,048 and 8,192 tokens), CPU
+  latency (40 conditions), the optimized variants on a 10-case subset (`--variant-cases 10`, cut from 20 by the researcher to save CPU time), variant latency, GPU latency,
+  `calibrate`, `eval-summary`, `freeze-plan` (version 1, 0 final-split items scored) and `phase2-report`, run `p2-dev`. Results: research.md R21 and `report2.md`.
+- **Parity failed its strict criteria**, so GPU-scored quality is labeled unverified in the report (research.md R21). The audit was by an AI assistant at the researcher's request.
+- Bugs found while running or by the independent review (branch `agent/review-fixes`, merged) are fixed with tests: capped runs reported complete, resume across
+  rebuilt families, a torn last line after a crash, oracle latency timing a cache, the retrieval budget and the plan using other devices' cells, and `phase2-all` dropping step options.
+  The four analysis commands (`calibrate`, `eval-summary`, `freeze-plan`, `phase2-report`) had no Phase 2 model default and refused the recorded run; fixed with a test.
+- Offline CLI end-to-end tests and a CI workflow were added (branch `agent/test-hardening`, merged); the workflow has not run on GitHub.

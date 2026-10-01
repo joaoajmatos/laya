@@ -76,7 +76,7 @@ The CPU parity subset (the same items on CPU, so GPU-scored quality can be calle
 ```bash
 python -m experiments eval --device cpu --sample variant --conditions native,truncCap,retrieve1024 --run-id p2-dev
 python -m experiments latency --device cpu --run-id p2-dev
-python -m experiments eval --variants fastpath_off,int8_encoder,int8_all_nofast --run-id p2-dev
+python -m experiments eval --variants fastpath_off,int8_encoder,int8_all_nofast --variant-cases 10 --run-id p2-dev
 python -m experiments latency --variants fastpath_off,int8_encoder,int8_all_nofast --run-id p2-dev
 ```
 

@@ -973,6 +973,22 @@ def _condition_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--families-id", default=None, help="families to use (default: the most recent)")
 
 
+def _variant_subset(case_ids, n):
+    """The first `n` cases of the variant sample, spread evenly over the workflows (all of them when `n` is unset)."""
+    ids = sorted(case_ids)
+    if not n or n >= len(ids):
+        return ids
+    by_wf = {}
+    for c in ids:
+        by_wf.setdefault(c.rsplit("_", 1)[0], []).append(c)
+    if n < len(by_wf):
+        raise ToolError("--variant-cases %d is below the number of workflows (%d)" % (n, len(by_wf)))
+    take = {w: n // len(by_wf) for w in by_wf}
+    for w in sorted(by_wf)[:n % len(by_wf)]:
+        take[w] += 1
+    return sorted(c for w, cs in by_wf.items() for c in cs[:take[w]])
+
+
 def _plan_conditions(args: argparse.ArgumentParser, run_path, device: str = "cpu", sample: str = "all"):
     """(conditions, restricted, case_ids) for the requested conditions, variants and lengths.
 
@@ -996,7 +1012,7 @@ def _plan_conditions(args: argparse.ArgumentParser, run_path, device: str = "cpu
         for v in vs:
             conds += [evalrun.make_condition("native", L, variant=v, device=device, model=args.model) for L in lengths]
         splits = data.read_data_json("splits.json", args.data_root)
-        return conds, True, list(splits["variant_sample"])
+        return conds, True, _variant_subset(splits["variant_sample"], getattr(args, "variant_cases", None))
     for name in names:
         for L in lengths:
             params = {"size": tuned["size"]} if name == "window" else None
@@ -1016,6 +1032,9 @@ def _eval_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--time-cap", type=float, default=1800.0,
                    help="seconds one measuring process may run before it is relaunched to continue (default 1800)")
     p.add_argument("--max-cases", type=int, default=None, help="pilot: keep only the first N cases (recorded in the log)")
+    p.add_argument("--variant-cases", type=int, default=None,
+                   help="optimized variants only: run on N cases of the 20-case variant sample, spread evenly over the "
+                        "workflows (default all 20). The parity subset always uses all 20")
     p.add_argument("--resume", action="store_true", default=True, help="continue from existing predictions (always on)")
     p.add_argument("--device", default="cpu", choices=["cpu", "gpu"],
                    help="device that scores quality (default cpu). gpu is fast (about an hour for the whole dev grid) and needs "
@@ -1053,7 +1072,7 @@ def _cmd_eval(args: argparse.Namespace) -> int:
 
 
 def _calibrate_args(p: argparse.ArgumentParser) -> None:
-    pass
+    _phase2_defaults(p)
 
 
 @command("calibrate", "Fit per-question-type temperatures on the calibration-split results (calibration.json).",
@@ -1094,6 +1113,7 @@ def _cmd_latency(args: argparse.Namespace) -> int:
 
 
 def _summary_args(p: argparse.ArgumentParser) -> None:
+    _phase2_defaults(p)
     p.add_argument("--n-boot", type=int, default=5000, help="bootstrap resamples (default 5000)")
 
 
@@ -1113,6 +1133,7 @@ def _cmd_eval_summary(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- plan, report, all (T057)
 
 def _freeze_args(p: argparse.ArgumentParser) -> None:
+    _phase2_defaults(p)
     p.add_argument("--available-cases", type=int, default=200, help="final-split cases available (default 200)")
     p.add_argument("--new-version", action="store_true", help="create a new plan version (needs --reason)")
     p.add_argument("--reason", default="", help="why a new plan version is needed")
@@ -1136,6 +1157,7 @@ def _cmd_freeze_plan(args: argparse.Namespace) -> int:
 
 
 def _report2_args(p: argparse.ArgumentParser) -> None:
+    _phase2_defaults(p)
     _data_root_arg(p)
 
 
@@ -1213,7 +1235,7 @@ def _cmd_phase2_all(args: argparse.Namespace) -> int:
         ("eval --split calibration --device gpu", rid), ("calibrate", rid),
         # The CPU parity subset: the same items on CPU, so GPU-scored quality can be called CPU-equivalent.
         ("eval --split dev --device cpu --sample variant --conditions native,truncCap,retrieve1024", rid),
-        ("latency --device cpu", rid), ("eval --variants fastpath_off,int8_encoder,int8_all_nofast", rid),
+        ("latency --device cpu", rid), ("eval --variants fastpath_off,int8_encoder,int8_all_nofast --variant-cases 10", rid),
         ("latency --variants fastpath_off,int8_encoder,int8_all_nofast", rid), ("latency --device gpu", rid),
         ("eval-summary", rid), ("freeze-plan", rid), ("phase2-report", rid),
     ]

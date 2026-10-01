@@ -23,7 +23,7 @@ experiments/           Measurement tooling, run with `python -m experiments`
   kernels/             Dense, masked, block-local, gather-attend-scatter attention kernels
 tests/experiments/     Offline tests on a tiny fixture model
 specs/                 Spec Kit features (001-cpu-path-audit, 002-decision-benchmark-baselines)
-docs/                  research-plan, sparse-attention-report (draft), raya-feasibility (draft)
+docs/                  research-plan, sparse-attention-report (draft)
 .specify/              Spec Kit templates, scripts and memory/constitution.md
 ```
 
