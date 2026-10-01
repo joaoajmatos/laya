@@ -82,3 +82,6 @@ experiments/results/
 
 # Phase 2 dataset cache, derived items and split files (regenerable; never commit raw upstream records)
 experiments/data/
+
+# Raya golden fixtures (laya:004, laya:005); regenerable, vendored into raya/tests/data/ by hand
+artifacts/
