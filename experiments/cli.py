@@ -1297,3 +1297,43 @@ def _cmd_phase2_all(args: argparse.Namespace) -> int:
         if code:
             return code
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------- golden fixtures (laya:004, laya:005)
+
+_GOLDEN_ACTIONS = ("weights-inventory", "export", "kernels", "tokenizer")
+
+
+def _golden_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("action", choices=_GOLDEN_ACTIONS,
+                   help="weights-inventory | export (forward-pass goldens) | kernels | tokenizer")
+    p.add_argument("--out", default=None,
+                   help="output directory (default: artifacts/raya-golden/, tokenizer: artifacts/raya-golden/tokenizer/)")
+    p.add_argument("--checkpoint", default=None,
+                   help="local real checkpoint directory (weights-inventory, tokenizer); default is the offline fixture")
+    p.add_argument("--lengths", type=int_list, default=None, help="kernels: sequence lengths (default 256,1000,2048)")
+
+
+@command("golden", "Golden fixtures for Raya from the offline fixture model (laya:004, laya:005); no timings.",
+         _golden_args, default_run_id="golden")
+def _cmd_golden(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from .golden import common
+    out = Path(args.out) if args.out else (common.DEFAULT_OUT / "tokenizer" if args.action == "tokenizer"
+                                           else common.DEFAULT_OUT)
+    if args.action == "weights-inventory":
+        from .golden.weights import write_inventory
+        print(write_inventory(out, checkpoint=args.checkpoint))
+    elif args.action == "export":
+        from .golden.forward import export_all
+        export_all(out)
+        print(out)
+    elif args.action == "kernels":
+        from .golden.kernels import LENGTHS, export_kernels
+        export_kernels(out, lengths=tuple(args.lengths or LENGTHS))
+        print(out / "kernels")
+    else:
+        from .golden.tokenizer import export_tokenizer
+        export_tokenizer(out, checkpoint=args.checkpoint)
+        print(out)
+    return EXIT_OK
